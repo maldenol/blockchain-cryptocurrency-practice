@@ -2,14 +2,14 @@ mod block;
 mod consts;
 mod hash;
 mod merkle;
-mod obj2str;
 mod tx;
 
 use std::time::Instant;
 
+use obj2str::Obj2Str;
+
 use block::Blockchain;
 use consts::*;
-use obj2str::Obj2Str;
 
 fn main() {
     let mut blockchain = Blockchain::new();
@@ -19,7 +19,10 @@ fn main() {
 
         for _ in 0..DIFFICULTY_ADJUSTMENT_PERIOD {
             blockchain.mine();
-            println!("{}\n", blockchain.get_blocks().last().unwrap().to_str(1, 2));
+            println!(
+                "{}\n",
+                blockchain.get_blocks().last().unwrap().obj2str(1, 2)
+            );
         }
 
         let after = Instant::now();

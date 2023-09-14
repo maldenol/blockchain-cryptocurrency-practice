@@ -1,0 +1,3 @@
+[submodule "obj2str"]
+	path = obj2str
+	url = git@github.com:maldenol/obj2str.git

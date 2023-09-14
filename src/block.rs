@@ -5,25 +5,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use hmac_sha256::Hash as SHA256;
 use num_bigint::BigUint;
 
+use obj2str::Obj2Str;
+use obj2str_derive::Obj2Str;
+
 use crate::consts::*;
 use crate::hash::Hash;
 use crate::merkle::merkle_root;
-use crate::obj2str::Obj2Str;
 use crate::tx::*;
 
 const IMPOSSIBLE_BLOCK_HASH: Hash = Hash([255u8; 32]);
 
+#[derive(Obj2Str)]
 pub struct Blockchain {
     blocks: Vec<Block>,
     utx_pool: Vec<Tx>,
     utxo_pool: Vec<TxOutputRef>,
 }
 
+#[derive(Obj2Str)]
 pub struct Block {
     header: BlockHeader,
     txs: Vec<Tx>,
 }
 
+#[derive(Obj2Str)]
 pub struct BlockHeader {
     version: u32,
     prev_hash: Hash,
@@ -321,197 +326,5 @@ impl BlockHeader {
         target.div_assign((difficulty * BIG_NUMBER as f32) as u128);
 
         target
-    }
-}
-
-impl Obj2Str for Blockchain {
-    fn to_str(&self, tab_num: i8, brief_depth: i8) -> String {
-        if brief_depth <= 0 {
-            return String::from("Blockchain");
-        }
-
-        let mut string = String::with_capacity(1024);
-
-        string.push_str("Blockchain {");
-
-        Self::indent(&mut string, tab_num);
-        if brief_depth == 1 {
-            string.push_str(format!("blocks: Block[{}]", self.blocks.len()).as_str());
-        } else {
-            string.push_str("blocks: [");
-            for index in 0..self.blocks.len() {
-                Self::indent(&mut string, Self::intern_tab_num(tab_num));
-                string.push_str(format!("({}) ", index).as_str());
-                string.push_str(
-                    self.blocks[index]
-                        .to_str(
-                            Self::intern_tab_num(Self::intern_tab_num(tab_num)),
-                            brief_depth - 1,
-                        )
-                        .as_str(),
-                );
-                if tab_num > 0 || index < self.blocks.len() - 1 {
-                    string.push(',');
-                }
-            }
-            Self::indent(&mut string, tab_num);
-            string.push(']');
-        }
-        string.push(',');
-
-        Self::indent(&mut string, tab_num);
-        if brief_depth == 1 {
-            string.push_str(format!("utx_pool: Tx[{}]", self.utx_pool.len()).as_str());
-        } else {
-            string.push_str("utx_pool: [");
-            for index in 0..self.utx_pool.len() {
-                Self::indent(&mut string, Self::intern_tab_num(tab_num));
-                string.push_str(format!("({}) ", index).as_str());
-                string.push_str(
-                    self.utx_pool[index]
-                        .to_str(
-                            Self::intern_tab_num(Self::intern_tab_num(tab_num)),
-                            brief_depth - 1,
-                        )
-                        .as_str(),
-                );
-                if tab_num > 0 || index < self.utx_pool.len() - 1 {
-                    string.push(',');
-                }
-            }
-            Self::indent(&mut string, tab_num);
-            string.push(']');
-        }
-        string.push(',');
-
-        Self::indent(&mut string, tab_num);
-        if brief_depth == 1 {
-            string.push_str(format!("utxo_pool: TxOutputRef[{}]", self.utxo_pool.len()).as_str());
-        } else {
-            string.push_str("utxo_pool: [");
-            for index in 0..self.utxo_pool.len() {
-                Self::indent(&mut string, Self::intern_tab_num(tab_num));
-                string.push_str(format!("({}) ", index).as_str());
-                string.push_str(
-                    self.utxo_pool[index]
-                        .to_str(
-                            Self::intern_tab_num(Self::intern_tab_num(tab_num)),
-                            brief_depth - 1,
-                        )
-                        .as_str(),
-                );
-                if tab_num > 0 || index < self.utxo_pool.len() - 1 {
-                    string.push(',');
-                }
-            }
-            Self::indent(&mut string, tab_num);
-            string.push(']');
-        }
-        if tab_num > 0 {
-            string.push(',');
-        }
-
-        Self::indent_last(&mut string, tab_num);
-        string.push('}');
-
-        string
-    }
-}
-
-impl Obj2Str for Block {
-    fn to_str(&self, tab_num: i8, brief_depth: i8) -> String {
-        if brief_depth <= 0 {
-            return String::from("Block");
-        }
-
-        let mut string = String::with_capacity(1024);
-
-        string.push_str("Block {");
-
-        Self::indent(&mut string, tab_num);
-        string.push_str(
-            format!(
-                "header: {}",
-                self.header
-                    .to_str(Self::intern_tab_num(tab_num), brief_depth - 1)
-            )
-            .as_str(),
-        );
-        string.push(',');
-
-        Self::indent(&mut string, tab_num);
-        if brief_depth == 1 {
-            string.push_str(format!("txs: Tx[{}]", self.txs.len()).as_str());
-        } else {
-            string.push_str("txs: [");
-            for index in 0..self.txs.len() {
-                Self::indent(&mut string, Self::intern_tab_num(tab_num));
-                string.push_str(format!("({}) ", index).as_str());
-                string.push_str(
-                    self.txs[index]
-                        .to_str(
-                            Self::intern_tab_num(Self::intern_tab_num(tab_num)),
-                            brief_depth - 1,
-                        )
-                        .as_str(),
-                );
-                if tab_num > 0 || index < self.txs.len() - 1 {
-                    string.push(',');
-                }
-            }
-            Self::indent(&mut string, tab_num);
-            string.push(']');
-        }
-        if tab_num > 0 {
-            string.push(',');
-        }
-
-        Self::indent_last(&mut string, tab_num);
-        string.push('}');
-
-        string
-    }
-}
-
-impl Obj2Str for BlockHeader {
-    fn to_str(&self, tab_num: i8, brief_depth: i8) -> String {
-        if brief_depth <= 0 {
-            return String::from("BlockHeader");
-        }
-
-        let mut string = String::with_capacity(1024);
-
-        string.push_str("BlockHeader {");
-
-        Self::indent(&mut string, tab_num);
-        string.push_str(format!("version: {}", self.version).as_str());
-        string.push(',');
-
-        Self::indent(&mut string, tab_num);
-        string.push_str(format!("prev_hash: {}", self.prev_hash.to_str(0, 0)).as_str());
-        string.push(',');
-
-        Self::indent(&mut string, tab_num);
-        string.push_str(format!("merkle_root: {}", self.merkle_root.to_str(0, 0)).as_str());
-        string.push(',');
-
-        Self::indent(&mut string, tab_num);
-        string.push_str(format!("timestamp: {}", self.timestamp).as_str());
-        string.push(',');
-
-        Self::indent(&mut string, tab_num);
-        string.push_str(format!("difficulty: {:.08}", self.difficulty).as_str());
-        string.push(',');
-
-        Self::indent(&mut string, tab_num);
-        string.push_str(format!("nonce: {}", self.nonce).as_str());
-        if tab_num > 0 {
-            string.push(',');
-        }
-
-        Self::indent_last(&mut string, tab_num);
-        string.push('}');
-
-        string
     }
 }

@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use crate::obj2str::Obj2Str;
+use obj2str::Obj2Str;
 
 #[derive(Clone, Copy, PartialEq)]
 #[repr(transparent)]
@@ -21,7 +21,7 @@ impl From<[u8; 32]> for Hash {
 }
 
 impl Obj2Str for Hash {
-    fn to_str(&self, _tab_num: i8, _brief_depth: i8) -> String {
+    fn obj2str(&self, _tab_num: i8, _brief_depth: i8) -> String {
         let mut string = String::with_capacity(64);
 
         for byte in self.iter() {
