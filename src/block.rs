@@ -138,11 +138,37 @@ impl Blockchain {
         }
     }
 
+    fn validate_coinbase_tx(&self, coinbase_tx: &Tx, other_txs: &[Tx], height: u32) -> bool {
+        // Checking if the inputs and the outputs are not empty
+        if coinbase_tx.inputs.is_empty() || coinbase_tx.outputs.is_empty() {
+            return false;
+        }
+
+        // Calculating fees of the rest transaction of the block
+        let mut fees = 0;
+        for tx in other_txs {
+            if let Some(fee) = tx.get_fee(self, height) {
+                fees += fee;
+            } else {
+                return false;
+            }
+        }
+
+        // Calculating the block's reward
+        let mut block_reward = 0u64;
+        for output in coinbase_tx.outputs.iter() {
+            block_reward += output.amount;
+        }
+
+        // Checking if the block's reward is correct
+        block_reward == Blockchain::calculate_block_reward(height) + fees
+    }
+
     fn choose_txs_with_fee(&mut self) -> (Vec<Tx>, u64, Vec<usize>) {
         // Checking if the blockchain is not empty
-        if self.get_height().is_none() {
+        let Some(current_height) = self.get_height() else {
             return (Vec::new(), 0, Vec::new());
-        }
+        };
 
         let mut txs = Vec::new();
         let mut fees = 0u64;
@@ -166,7 +192,7 @@ impl Blockchain {
             mem_available = new_mem_available;
 
             // Validating the transaction
-            if !tx.validate(self) {
+            if !tx.validate(self, current_height) {
                 continue;
             }
 
@@ -200,13 +226,115 @@ impl Blockchain {
         (txs, fees, used_utxo)
     }
 
-    pub fn add_utx(&mut self, tx: Tx) {
+    fn calculate_utxo_pool(&self, height: u32) -> Vec<TxOutputRef> {
         // Checking if the blockchain is not empty
-        if self.get_height().is_none() {
-            return;
+        let Some(current_height) = self.get_height() else {
+            return Vec::new();
+        };
+
+        // Checking if the height is not greater than the current one
+        if height > current_height {
+            return Vec::new();
         }
 
-        let Some(fee) = tx.get_fee(self) else {
+        let mut utxo_pool = Vec::new();
+
+        // For each block from the beginning of the blockchain to the specific height
+        for block in self.blocks.iter().take(height as usize + 1) {
+            // For each transaction in the block
+            for (tx_index, tx) in block.txs.iter().enumerate() {
+                // If the transaction is a not coinbase transaction
+                if tx_index > 0 {
+                    // For each input in the transaction
+                    for input in tx.inputs.iter() {
+                        // Removing used UTXO from the UTXO pool
+                        utxo_pool.remove(
+                            utxo_pool
+                                .iter()
+                                .position(|output_ref| *output_ref == input.output_ref)
+                                .unwrap(),
+                        );
+                    }
+                }
+
+                let hash = tx.hash();
+
+                // For each output in the transaction
+                for index in 0..tx.outputs.len() {
+                    // Adding a new UTXO to the UTXO pool
+                    utxo_pool.push(TxOutputRef {
+                        tx_hash: hash,
+                        output_index: index as u32,
+                    });
+                }
+            }
+        }
+
+        utxo_pool
+    }
+
+    fn calculate_utxo_pool_rev(&self, height: u32) -> Vec<TxOutputRef> {
+        // Checking if the blockchain is not empty
+        let Some(current_height) = self.get_height() else {
+            return Vec::new();
+        };
+
+        // Checking if the height is not greater than the current one
+        if height > current_height {
+            return Vec::new();
+        }
+
+        let mut utxo_pool = self.utxo_pool.clone();
+
+        // For each block from the end of the blockchain to the specific height
+        for block in self
+            .blocks
+            .iter()
+            .rev()
+            .take((current_height - height) as usize)
+        {
+            // For each transaction in the block
+            for (tx_index, tx) in block.txs.iter().enumerate() {
+                // If the transaction is a not coinbase transaction
+                if tx_index > 0 {
+                    // For each input in the transaction
+                    for input in tx.inputs.iter() {
+                        // Adding used UTXO to the UTXO pool
+                        utxo_pool.push(input.output_ref.clone());
+                    }
+                }
+
+                let hash = tx.hash();
+
+                // For each output in the transaction
+                for index in 0..tx.outputs.len() {
+                    // Removing a new UTXO from the UTXO pool
+                    utxo_pool.remove(
+                        utxo_pool
+                            .iter()
+                            .position(|output_ref| {
+                                *output_ref
+                                    == TxOutputRef {
+                                        tx_hash: hash,
+                                        output_index: index as u32,
+                                    }
+                            })
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+
+        utxo_pool
+    }
+
+    pub fn add_utx(&mut self, tx: Tx) {
+        // Checking if the blockchain is not empty
+        let Some(current_height) = self.get_height() else {
+            return;
+        };
+
+        let Some(fee) = tx.get_fee(self, current_height) else {
             return;
         };
 
@@ -236,9 +364,10 @@ impl Blockchain {
         }
     }
 
-    pub fn get_tx(&self, hash: &Hash) -> Option<&Tx> {
+    pub fn get_tx(&self, hash: &Hash, height: u32) -> Option<&Tx> {
         // Searching for the transaction in the blockchain starting from the last block
-        for block in self.blocks.iter().rev() {
+        // with specific height
+        for block in self.blocks.iter().take(height as usize + 1).rev() {
             // For each transaction in the block
             for tx in block.txs.iter() {
                 // Comparing by hashes
@@ -251,13 +380,28 @@ impl Blockchain {
         None
     }
 
-    pub fn get_tx_output(&self, output_ref: &TxOutputRef) -> Option<&TxOutput> {
-        let tx = self.get_tx(&output_ref.tx_hash)?;
+    pub fn get_tx_output(&self, output_ref: &TxOutputRef, height: u32) -> Option<&TxOutput> {
+        let tx = self.get_tx(&output_ref.tx_hash, height)?;
         tx.outputs.get(output_ref.output_index as usize)
     }
 
-    pub fn is_utxo(&self, output_ref: &TxOutputRef) -> bool {
-        self.utxo_pool.contains(output_ref)
+    pub fn is_utxo(&self, output_ref: &TxOutputRef, height: u32) -> bool {
+        // Checking if the blockchain is not empty
+        let Some(current_height) = self.get_height() else {
+            return false;
+        };
+
+        // If the height is greater or equals to the current one
+        if height >= current_height {
+            // Checking if the output is an UTXO using the current UTXO pool
+            self.utxo_pool.contains(output_ref)
+        } else if height <= current_height / 2 {
+            // Checking if the output is an UTXO using the calculated from the beginning UTXO pool
+            self.calculate_utxo_pool(height).contains(output_ref)
+        } else {
+            // Checking if the output is an UTXO using the calculated from the end UTXO pool
+            self.calculate_utxo_pool_rev(height).contains(output_ref)
+        }
     }
 }
 
@@ -267,6 +411,45 @@ impl Block {
             header: BlockHeader::mine(prev_hash, difficulty, &mut txs),
             txs,
         }
+    }
+
+    fn validate(&self, blockchain: &Blockchain, height: u32) -> bool {
+        // Validating the header
+        if !self.header.validate(blockchain, &self.txs, height) {
+            return false;
+        }
+
+        // Checking if the transactions are not empty
+        if self.txs.is_empty() {
+            return false;
+        }
+
+        // Checking if the maximum size is not exceeded
+        if self.get_size() > MAX_BLOCK_SIZE {
+            return false;
+        }
+
+        // Validating the coinbase transaction
+        if !blockchain.validate_coinbase_tx(&self.txs[0], &self.txs[1..], height) {
+            return false;
+        }
+
+        // Validating all the transactions except for the coinbase one
+        for (index, tx) in self.txs.iter().enumerate() {
+            if index > 0 && !tx.validate(blockchain, height) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn get_size(&self) -> usize {
+        let mut size = size_of::<BlockHeader>();
+        for tx in self.txs.iter() {
+            size += tx.get_size();
+        }
+        size
     }
 
     pub fn get_header(&self) -> &BlockHeader {
@@ -328,6 +511,51 @@ impl BlockHeader {
         hasher.update(self.nonce.to_be_bytes());
         let hash = hasher.finalize();
         SHA256::hash(hash.as_slice()).into()
+    }
+
+    fn validate(&self, blockchain: &Blockchain, txs: &[Tx], height: u32) -> bool {
+        // Validating the hash
+        if !self.validate_hash() {
+            return false;
+        }
+
+        // If it is a genesis block
+        if height == 0 {
+            // Validating previous block's hash in the header
+            if self.prev_hash != IMPOSSIBLE_BLOCK_HASH {
+                return false;
+            }
+
+            return true;
+        }
+
+        let prev_block_header = &blockchain.blocks[height as usize - 1].header;
+
+        // Validating previous block's hash in the header
+        if self.prev_hash != prev_block_header.hash() {
+            return false;
+        }
+
+        // Validating the Merkle tree root
+        if self.merkle_root != merkle_root(txs) {
+            return false;
+        }
+
+        // Validating the timestamp
+        if self.timestamp > prev_block_header.timestamp {
+            if self.timestamp - prev_block_header.timestamp > MAX_TIMESTAMP_DELTA {
+                return false;
+            }
+        } else if prev_block_header.timestamp - self.timestamp > MAX_TIMESTAMP_DELTA {
+            return false;
+        }
+
+        // Validating the difficulty
+        if self.difficulty - blockchain.calculate_difficulty(height) > 0.0000001f32 {
+            return false;
+        }
+
+        true
     }
 
     fn validate_hash(&self) -> bool {
