@@ -12,13 +12,14 @@ use crate::consts::*;
 use crate::hash::Hash;
 use crate::merkle::merkle_root;
 use crate::tx::*;
+use crate::wallet::Wallet;
 
 const IMPOSSIBLE_BLOCK_HASH: Hash = Hash([255u8; 32]);
 
 #[derive(Obj2Str)]
 pub struct Blockchain {
     blocks: Vec<Block>,
-    utx_pool: Vec<Tx>,
+    utx_pool: Vec<(Tx, u64)>,
     utxo_pool: Vec<TxOutputRef>,
 }
 
@@ -47,13 +48,13 @@ impl Blockchain {
         }
     }
 
-    pub fn mine(&mut self) {
+    pub fn mine(&mut self, wallet: &Wallet) {
         // If there is no blocks yet, mine the genesis one
         let Some(current_height) = self.get_height() else {
             self.blocks.push(Block::mine(
                 &IMPOSSIBLE_BLOCK_HASH,
                 self.calculate_difficulty(0),
-                vec![Blockchain::generate_coinbase_tx(0, 0)],
+                vec![Blockchain::generate_coinbase_tx(wallet, 0, 0)],
             ));
             return;
         };
@@ -62,7 +63,7 @@ impl Blockchain {
         let (mut txs, fees, used_utxo) = self.choose_txs_with_fee();
 
         // Generating a coinbase transaction
-        let coinbase_tx = Blockchain::generate_coinbase_tx(fees, current_height);
+        let coinbase_tx = Blockchain::generate_coinbase_tx(wallet, fees, current_height);
         txs.insert(0, coinbase_tx);
 
         // Mining a block
@@ -118,7 +119,7 @@ impl Blockchain {
         MINING_REWARD / 2u64.pow(height / HALVING_PERIOD)
     }
 
-    fn generate_coinbase_tx(fees: u64, height: u32) -> Tx {
+    fn generate_coinbase_tx(wallet: &Wallet, fees: u64, height: u32) -> Tx {
         let block_reward = Blockchain::calculate_block_reward(height);
 
         Tx {
@@ -128,9 +129,11 @@ impl Blockchain {
                     tx_hash: Hash([0u8; 32]),
                     output_index: 0,
                 },
+                signature: None,
             }],
             outputs: vec![TxOutput {
                 amount: block_reward + fees,
+                public_key: wallet.get_public_keys()[0].clone(),
             }],
         }
     }
@@ -149,16 +152,23 @@ impl Blockchain {
 
         // For each transaction in the UTX pool
         'utx_pool: for _ in 0..self.utx_pool.len() {
-            let tx = self.utx_pool.pop().unwrap();
+            // Getting the UTX with the biggest fee
+            // because the UTX pool is sorted in ascending order
+            let (tx, fee) = self.utx_pool.pop().unwrap();
 
             // Checking for available memory in the block
             let (new_mem_available, not_available) = mem_available.overflowing_sub(tx.get_size());
             if not_available {
                 // Push the transaction back and break
-                self.utx_pool.push(tx);
+                self.utx_pool.push((tx, fee));
                 break;
             }
             mem_available = new_mem_available;
+
+            // Validating the transaction
+            if !tx.validate(self) {
+                continue;
+            }
 
             // Getting UTXOs used by the transaction
             let mut inner_used_utxo = Vec::new();
@@ -181,16 +191,37 @@ impl Blockchain {
                 }
             }
 
-            // If the transaction is valid
-            if let Some(fee) = tx.validate_and_get_fee(self) {
-                // Adding transaction, its fee and used UTXO
-                txs.push(tx);
-                fees += fee;
-                used_utxo.append(&mut inner_used_utxo);
-            }
+            // Adding transaction, its fee and used UTXO
+            txs.push(tx);
+            fees += fee;
+            used_utxo.append(&mut inner_used_utxo);
         }
 
         (txs, fees, used_utxo)
+    }
+
+    pub fn add_utx(&mut self, tx: Tx) {
+        // Checking if the blockchain is not empty
+        if self.get_height().is_none() {
+            return;
+        }
+
+        let Some(fee) = tx.get_fee(self) else {
+            return;
+        };
+
+        // Inserting the transaction to the UTX pool
+        // so that all the transactions are sorted in ascending order by fee
+        let mut index = 0;
+        for (_, utx_fee) in self.utx_pool.iter() {
+            if fee >= *utx_fee {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+
+        self.utx_pool.insert(index, (tx, fee));
     }
 
     pub fn get_blocks(&self) -> &[Block] {

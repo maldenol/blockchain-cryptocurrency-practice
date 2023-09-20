@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 hmac-sha256 = "1.1.7"
+k256 = "0.13.1"
 num-bigint = "0.4.4"
 obj2str = { version = "1.0.0", path = "obj2str/obj2str" }
 obj2str_derive = { version = "1.0.0", path = "obj2str/obj2str_derive" }
+rand_core = "0.6.4"

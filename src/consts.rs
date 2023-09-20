@@ -6,6 +6,7 @@ pub const DIFFICULTY_ADJUSTMENT_PERIOD: u32 = 10;
 pub const MAX_DIFFICULTY_TARGET: u32 = 0x21000100;
 //pub const BLOCK_MINING_TIME: u32 = 10 * 60;
 pub const BLOCK_MINING_TIME: u32 = 1;
+pub const MAX_TIMESTAMP_DELTA: u64 = 24 * 60 * 60 * 1_000_000_000;
 pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
 
 // Cryptocurrency
