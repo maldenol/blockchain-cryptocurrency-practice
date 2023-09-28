@@ -3,42 +3,62 @@ mod consts;
 mod digsig;
 mod hash;
 mod merkle;
+mod netdriver;
 mod tx;
 mod wallet;
 
-use std::time::Instant;
+use std::thread::sleep;
+use std::time::Duration;
 
-use obj2str::Obj2Str;
-
-use block::Blockchain;
-use consts::*;
-use digsig::PrivateKey;
-use wallet::Wallet;
+use crate::consts::{MAX_CONNECTION_NUMBER, MIN_CONNECTION_NUMBER};
+use netdriver::NetDriver;
 
 fn main() {
-    let mut wallet = Wallet::new();
-    wallet.insert(0, PrivateKey::random());
+    const INSTANCE_NUMBER: usize = 10;
+    const ITERATION_NUMBER: usize = 20;
 
-    println!("{}\n", wallet.obj2str(1, 2));
+    let mut net_drivers = Vec::new();
 
-    let mut blockchain = Blockchain::new();
+    print!("Initializing NetDrivers: ");
+    for index in 0..INSTANCE_NUMBER {
+        let net_driver = NetDriver::new(format!("127.0.0.1:80{:02}", index).parse().unwrap());
+        net_drivers.push(net_driver);
+        print!("{:02} ", index);
+    }
+    println!();
 
-    for _ in 0..10 {
-        let before = Instant::now();
+    print!("Providing NetDrivers with connection addresses: ");
+    for (index, net_driver) in net_drivers.iter_mut().enumerate() {
+        // Example 1 (fully linked)
+        // for inner_index in 0..INSTANCE_NUMBER {
+        //     net_driver.add_connections(vec![format!("127.0.0.1:80{:02}", inner_index).parse().unwrap()]);
+        // }
+        // Example 2 (first fully linked)
+        // for inner_index in 0..(if index == 0 { INSTANCE_NUMBER } else { 1 }) {
+        //     net_driver.add_connections(vec![format!("127.0.0.1:80{:02}", inner_index).parse().unwrap()]);
+        // }
+        // Example 3 (first fully linked)
+        // for inner_index in 0..(if index == 0 { INSTANCE_NUMBER } else { 0 }) {
+        //     net_driver.add_connections(vec![format!("127.0.0.1:80{:02}", inner_index).parse().unwrap()]);
+        // }
+        // Example 4 (linked chain, try several times, it shows the result the best)
+        net_driver.add_connections(vec![format!("127.0.0.1:80{:02}", index + 1)
+            .parse()
+            .unwrap()]);
+        print!("{:02} ", index);
+    }
+    println!();
 
-        for _ in 0..DIFFICULTY_ADJUSTMENT_PERIOD {
-            blockchain.mine(&wallet);
-            println!(
-                "{}\n",
-                blockchain.get_blocks().last().unwrap().obj2str(1, 5)
-            );
+    println!(
+        "Number of connections of each NetDriver (must be {} <= n <= {}):",
+        usize::min(MIN_CONNECTION_NUMBER, INSTANCE_NUMBER - 1),
+        usize::min(MAX_CONNECTION_NUMBER, INSTANCE_NUMBER - 1),
+    );
+    for _ in 0..ITERATION_NUMBER {
+        sleep(Duration::from_secs(1));
+        for net_driver in net_drivers.iter() {
+            print!("{:02} ", net_driver.get_connection_number());
         }
-
-        let after = Instant::now();
-        let dur = after - before;
-        println!(
-            "Average mining time = {} seconds",
-            dur.as_nanos() as f32 / 1_000_000_000f32 / DIFFICULTY_ADJUSTMENT_PERIOD as f32
-        );
+        println!();
     }
 }

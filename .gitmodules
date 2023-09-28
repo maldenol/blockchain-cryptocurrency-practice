@@ -1,3 +1,6 @@
 [submodule "obj2str"]
 	path = obj2str
 	url = git@github.com:maldenol/obj2str.git
+[submodule "semaphore"]
+	path = semaphore
+	url = git@github.com:maldenol/semaphore

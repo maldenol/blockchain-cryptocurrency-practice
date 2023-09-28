@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 // Blockchain
 pub const BLOCK_VERSION: u32 = 1;
 //pub const DIFFICULTY_ADJUSTMENT_PERIOD: u32 = 2_016;
@@ -14,3 +16,12 @@ pub const TX_VERSION: u32 = 1;
 pub const CENTS_IN_COIN: u64 = 100_000_000;
 pub const MINING_REWARD: u64 = 50 * CENTS_IN_COIN;
 pub const HALVING_PERIOD: u32 = 210_000;
+
+// Network
+pub const MIN_CONNECTION_NUMBER: usize = 10;
+pub const MAX_CONNECTION_NUMBER: usize = 20;
+pub const NET_CONNECT_TIMEOUT: Duration = Duration::from_millis(5000);
+pub const NET_LISTEN_TIMEOUT: Duration = Duration::from_millis(5000);
+pub const NET_READ_TIMEOUT: Duration = Duration::from_millis(1000);
+pub const NET_WRITE_TIMEOUT: Duration = Duration::from_millis(1000);
+pub const MAX_NET_DATA_SIZE: usize = 20 * 1024 * 1024;
