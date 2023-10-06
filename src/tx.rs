@@ -1,6 +1,8 @@
+use std::cmp::Ordering;
 use std::mem::{size_of, size_of_val};
 
 use hmac_sha256::Hash as SHA256;
+use serde_derive::{Deserialize, Serialize};
 
 use obj2str::Obj2Str;
 use obj2str_derive::Obj2Str;
@@ -10,26 +12,26 @@ use crate::digsig::{PublicKey, Signat};
 use crate::hash::Hash;
 use crate::wallet::Wallet;
 
-#[derive(Obj2Str)]
+#[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct Tx {
     pub version: u32,
     pub inputs: Vec<TxInput>,
     pub outputs: Vec<TxOutput>,
 }
 
-#[derive(Obj2Str)]
+#[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct TxInput {
     pub output_ref: TxOutputRef,
     pub signature: Option<Signat>,
 }
 
-#[derive(Obj2Str)]
+#[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct TxOutput {
     pub amount: u64,
     pub public_key: PublicKey,
 }
 
-#[derive(Obj2Str, Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Obj2Str)]
 pub struct TxOutputRef {
     pub tx_hash: Hash,
     pub output_index: u32,
@@ -149,5 +151,25 @@ impl Tx {
 
     pub fn get_outputs(&self) -> &[TxOutput] {
         &self.outputs
+    }
+}
+
+impl PartialEq for Tx {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash() == other.hash()
+    }
+}
+
+impl Eq for Tx {}
+
+impl PartialOrd for Tx {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.hash().cmp(&other.hash()))
+    }
+}
+
+impl Ord for Tx {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.hash().cmp(&other.hash())
     }
 }

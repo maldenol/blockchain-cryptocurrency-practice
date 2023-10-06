@@ -1,35 +1,42 @@
 use std::mem::size_of;
 use std::ops::{DivAssign, MulAssign};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bincode::{deserialize, serialize};
 use hmac_sha256::Hash as SHA256;
 use num_bigint::BigUint;
+use serde_derive::{Deserialize, Serialize};
 
 use obj2str::Obj2Str;
 use obj2str_derive::Obj2Str;
+use semaphore::{Semaphore, SemaphoreGuard};
 
 use crate::consts::*;
 use crate::hash::Hash;
 use crate::merkle::merkle_root;
+use crate::netdriver::NetDriver;
 use crate::tx::*;
 use crate::wallet::Wallet;
 
 const IMPOSSIBLE_BLOCK_HASH: Hash = Hash([255u8; 32]);
 
-#[derive(Obj2Str)]
 pub struct Blockchain {
     blocks: Vec<Block>,
     utx_pool: Vec<(Tx, u64)>,
     utxo_pool: Vec<TxOutputRef>,
+    data_mtx: Semaphore,
+    wallet: Arc<Mutex<Wallet>>,
+    net_driver: Arc<Mutex<Box<NetDriver>>>,
 }
 
-#[derive(Obj2Str)]
+#[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct Block {
     header: BlockHeader,
     txs: Vec<Tx>,
 }
 
-#[derive(Obj2Str)]
+#[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct BlockHeader {
     version: u32,
     prev_hash: Hash,
@@ -39,23 +46,45 @@ pub struct BlockHeader {
     nonce: u32,
 }
 
+#[derive(Serialize, Deserialize)]
+enum Message {
+    BlockDownloadRequest(Hash),
+    BlockDownloadResponse(Vec<Block>),
+    TxDownloadRequest(Hash),
+    TxDownloadResponse(Vec<Tx>),
+    BlockBroadcast(Block),
+    TxBroadcast(Tx),
+}
+
 impl Blockchain {
-    pub fn new() -> Self {
+    pub fn new(wallet: Arc<Mutex<Wallet>>, net_driver: Arc<Mutex<Box<NetDriver>>>) -> Self {
         Blockchain {
             blocks: Vec::new(),
             utx_pool: Vec::new(),
             utxo_pool: Vec::new(),
+            data_mtx: Semaphore::new(1),
+            wallet,
+            net_driver,
         }
     }
 
-    pub fn mine(&mut self, wallet: &Wallet) {
+    pub fn mine(&mut self) {
+        // Acquiring read-write access to the blockchain
+        self.data_mtx.acquire();
+
         // If there is no blocks yet, mine the genesis one
         let Some(current_height) = self.get_height() else {
             self.blocks.push(Block::mine(
                 &IMPOSSIBLE_BLOCK_HASH,
                 self.calculate_difficulty(0),
-                vec![Blockchain::generate_coinbase_tx(wallet, 0, 0)],
+                vec![Blockchain::generate_coinbase_tx(
+                    &self.wallet.lock().unwrap(),
+                    0,
+                    0,
+                )],
             ));
+
+            self.data_mtx.release();
             return;
         };
 
@@ -63,13 +92,28 @@ impl Blockchain {
         let (mut txs, fees, used_utxo) = self.choose_txs_with_fee();
 
         // Generating a coinbase transaction
-        let coinbase_tx = Blockchain::generate_coinbase_tx(wallet, fees, current_height);
+        let coinbase_tx =
+            Blockchain::generate_coinbase_tx(&self.wallet.lock().unwrap(), fees, current_height);
         txs.insert(0, coinbase_tx);
 
-        // Mining a block
+        // Getting the hash of the previous block and a new difficulty
         let prev_hash = self.blocks.last().unwrap().header.hash();
         let difficulty = self.calculate_difficulty(current_height + 1);
+
+        // Releasing read-write access to the blockchain
+        self.data_mtx.release();
+
+        // Mining a block
         let block = Block::mine(&prev_hash, difficulty, txs);
+
+        // Acquiring read-write access to the blockchain
+        self.data_mtx.acquire();
+
+        // Checking that the block is still valid (no blocks were added from another threads)
+        if !block.validate(self, self.get_height().unwrap() + 1) {
+            self.data_mtx.release();
+            return;
+        }
 
         // Removing used outputs from the UTXO pool
         for index in used_utxo.iter().rev() {
@@ -88,7 +132,13 @@ impl Blockchain {
         }
 
         // Adding the block to the blockchain
-        self.blocks.push(block);
+        self.blocks.push(block.clone());
+
+        // Broadcasting the block
+        self.broadcast_block(block);
+
+        // Releasing read-write access to the blockchain
+        self.data_mtx.release();
     }
 
     fn calculate_difficulty(&self, height: u32) -> f32 {
@@ -338,6 +388,12 @@ impl Blockchain {
             return;
         };
 
+        // Broadcasting the transaction
+        self.broadcast_tx(tx.clone());
+
+        // Acquiring read-write access to the blockchain
+        self.data_mtx.acquire();
+
         // Inserting the transaction to the UTX pool
         // so that all the transactions are sorted in ascending order by fee
         let mut index = 0;
@@ -350,10 +406,16 @@ impl Blockchain {
         }
 
         self.utx_pool.insert(index, (tx, fee));
+
+        // Releasing read-write access to the blockchain
+        self.data_mtx.release();
     }
 
-    pub fn get_blocks(&self) -> &[Block] {
-        &self.blocks
+    pub fn get_blocks(&self) -> Vec<Block> {
+        // Acquiring read-write access to the blockchain
+        let _data_mtx = SemaphoreGuard::acquire(&self.data_mtx);
+
+        self.blocks.clone()
     }
 
     pub fn get_height(&self) -> Option<u32> {
@@ -402,6 +464,415 @@ impl Blockchain {
             // Checking if the output is an UTXO using the calculated from the end UTXO pool
             self.calculate_utxo_pool_rev(height).contains(output_ref)
         }
+    }
+
+    pub fn get_next_blocks(&self, hash: Hash) -> Vec<Block> {
+        // Checking if the blockchain is not empty
+        if self.get_height().is_none() {
+            return Vec::new();
+        }
+
+        // If there is a block with such hash
+        if hash != IMPOSSIBLE_BLOCK_HASH {
+            if let Some(height) = self
+                .blocks
+                .iter()
+                .position(|block| block.header.hash() == hash)
+            {
+                // Returning that block and all the next ones
+                return self.blocks[height..].to_vec();
+            }
+        }
+
+        // Returning the first several blocks
+        self.blocks
+            .iter()
+            .take(MAX_BLOCKS_PER_DOWNLOAD)
+            .cloned()
+            .collect()
+    }
+
+    pub fn get_oldest_accidental_fork_block_hash(&self) -> Hash {
+        // Checking if the blockchain is not empty
+        if self.get_height().is_none() {
+            // Returning the impossible block hash
+            return IMPOSSIBLE_BLOCK_HASH;
+        }
+
+        let index = self
+            .blocks
+            .len()
+            .saturating_sub(1 + MAX_ACCIDENTAL_FORK_HEIGHT as usize);
+        self.blocks[index].header.hash()
+    }
+
+    pub fn fast_forward(&mut self, blocks: &[Block]) -> bool {
+        let mut blocks_updated = false;
+
+        // For each block
+        for block in blocks.iter() {
+            // Checking if the blockchain is not empty
+            let Some(current_height) = self.get_height() else {
+                // If the block is valid
+                if block.validate(self, 0) {
+                    // Adding the block to the blockchain
+                    self.blocks.push(block.clone());
+                    blocks_updated = true;
+                } else {
+                    // Finishing because next blocks are invalid as well
+                    break;
+                }
+
+                continue;
+            };
+
+            // If the block is the next one in the blockchain
+            // (will be valid if placed after the current last one)
+            let last_block_hash = self.blocks.last().unwrap().header.hash();
+            if block.header.prev_hash == last_block_hash {
+                // If the block is valid
+                if block.validate(self, current_height + 1) {
+                    // Adding the block to the blockchain
+                    self.blocks.push(block.clone());
+                    blocks_updated = true;
+                } else {
+                    // Finishing because next blocks are invalid as well
+                    break;
+                }
+            }
+        }
+
+        blocks_updated
+    }
+
+    pub fn rebase(&mut self, blocks: &[Block]) -> bool {
+        // Checking if the blockchain is not empty
+        if self.get_height().is_none() {
+            // Trying to fast-forward
+            return self.fast_forward(blocks);
+        }
+
+        // Finding the oldest block that is common for the local and the remote blockchains
+        let Some(oldest_common_block_height) = self
+            .blocks
+            .iter()
+            .position(|local_block| local_block.header.hash() == blocks[0].header.hash())
+        else {
+            return false;
+        };
+
+        // Checking that it is not an intentional fork
+        let Some(latest_common_block_index) = self.blocks.iter().rev().position(|local_block| {
+            blocks
+                .iter()
+                .any(|remote_block| local_block.header.hash() == remote_block.header.hash())
+        }) else {
+            return false;
+        };
+        // During this search indexes are going backwards so they are equal to the length of the fork
+        let fork_length = latest_common_block_index as u32;
+        if fork_length > MAX_ACCIDENTAL_FORK_HEIGHT {
+            return false;
+        }
+
+        // Checking that the height of the remote blockchain is greater than the height of the local one
+        let local_chain_length = self.blocks.len() - oldest_common_block_height;
+        let remote_chain_length = blocks.len();
+        if remote_chain_length <= local_chain_length {
+            return false;
+        }
+
+        // Saving the part of the local blockchain that will be replaced
+        let mut old_local_chain = self.blocks.drain(oldest_common_block_height..).collect();
+
+        // If the genesis block is the oldest common one
+        if self.get_height().is_none() {
+            // If the new genesis block is valid
+            if blocks[0].validate(self, 0) {
+                // Replacing the genesis block with the new one
+                self.blocks.push(blocks[0].clone());
+
+                // Trying to fast-forward the rest of the new blocks
+                let _ = self.fast_forward(&blocks[1..]);
+            }
+        } else {
+            // Trying to fast-forward the new blocks
+            let _ = self.fast_forward(blocks);
+        }
+
+        // If the blockchain didn't become longer
+        let new_local_chain_length = self.blocks.len() - oldest_common_block_height;
+        if new_local_chain_length <= local_chain_length {
+            // Restoring the changes
+            self.blocks.drain(oldest_common_block_height..);
+            self.blocks.append(&mut old_local_chain);
+            return false;
+        }
+
+        true
+    }
+
+    pub fn rebase_root(&mut self, blocks: &[Block]) -> bool {
+        // Checking if the blockchain is not empty
+        let Some(current_height) = self.get_height() else {
+            // Trying to fast-forward
+            return self.fast_forward(blocks);
+        };
+
+        // Checking that the genesis block can be rebased
+        if current_height > MAX_ACCIDENTAL_FORK_HEIGHT {
+            return false;
+        }
+
+        // Checking that the height of the remote blockchain is greater than the height of the local one
+        let local_chain_length = self.blocks.len();
+        let remote_chain_length = blocks.len();
+        if remote_chain_length <= local_chain_length {
+            return false;
+        }
+
+        // Saving the part of the local blockchain that will be replaced
+        let mut old_local_chain = self.blocks.drain(..).collect();
+
+        // Checking that the new genesis block is valid
+        if !blocks[0].validate(self, 0) {
+            return false;
+        }
+
+        // Replacing the genesis block with the new one
+        self.blocks.push(blocks[0].clone());
+
+        // Trying to fast-forward the rest of the new blocks
+        let _ = self.fast_forward(&blocks[1..]);
+
+        // If the blockchain didn't become longer
+        let new_local_chain_length = self.blocks.len();
+        if new_local_chain_length <= local_chain_length {
+            // Restoring the changes
+            self.blocks.drain(..);
+            self.blocks.append(&mut old_local_chain);
+            return false;
+        }
+
+        true
+    }
+
+    pub fn handle_message(&mut self, conn_index: usize, msg: Vec<u8>) {
+        // If the message has been deserialized correctly
+        if let Ok(msg) = deserialize(&msg) {
+            // Acquiring read-write access to the blockchain
+            self.data_mtx.acquire();
+
+            // Handling the message based on its type
+            match msg {
+                Message::BlockDownloadRequest(hash) => {
+                    self.handle_block_download_request(conn_index, hash)
+                }
+                Message::BlockDownloadResponse(blocks) => {
+                    self.handle_block_download_response(blocks)
+                }
+                Message::TxDownloadRequest(hash) => {
+                    self.handle_tx_download_request(conn_index, hash)
+                }
+                Message::TxDownloadResponse(txs) => self.handle_tx_download_response(txs),
+                Message::BlockBroadcast(block) => self.handle_block_broadcast(block),
+                Message::TxBroadcast(tx) => self.handle_tx_broadcast(tx),
+            }
+
+            // Releasing read-write access to the blockchain
+            self.data_mtx.release();
+        }
+    }
+
+    fn handle_block_download_request(&mut self, conn_index: usize, hash: Hash) {
+        // Checking if the blockchain is not empty
+        if self.get_height().is_none() {
+            return;
+        }
+
+        let mut blocks = self.get_next_blocks(hash);
+
+        let msg = Message::BlockDownloadResponse(blocks.clone());
+        let mut msg = serialize(&msg).unwrap();
+
+        // Making sure that the size of the message is not exceeded
+        while msg.len() > MAX_NET_DATA_SIZE {
+            let _ = blocks.pop();
+
+            let new_msg = Message::BlockDownloadResponse(blocks.clone());
+            msg = serialize(&new_msg).unwrap();
+        }
+
+        self.net_driver
+            .lock()
+            .unwrap()
+            .send_custom_message(conn_index, msg);
+    }
+
+    fn handle_block_download_response(&mut self, blocks: Vec<Block>) {
+        if blocks.is_empty() {
+            return;
+        }
+
+        // Trying to fast-forward the downloaded blocks
+        if !self.fast_forward(&blocks) {
+            // If failed trying to rebase
+            if !self.rebase(&blocks) {
+                // If failed trying to rebase the genesis block
+                let _ = self.rebase_root(&blocks);
+            }
+        }
+    }
+
+    fn handle_tx_download_request(&mut self, conn_index: usize, hash: Hash) {
+        // Checking if the blockchain is not empty
+        if self.get_height().is_none() {
+            return;
+        }
+
+        // Checking that the requester and the responder have equal blockchains
+        if self.blocks.last().unwrap().get_header().hash() != hash {
+            return;
+        }
+
+        let mut txs: Vec<_> = self.utx_pool.iter().map(|(tx, _)| tx).cloned().collect();
+
+        if txs.is_empty() {
+            return;
+        }
+
+        let msg = Message::TxDownloadResponse(txs.clone());
+        let mut msg = serialize(&msg).unwrap();
+
+        // Making sure that the size of the message is not exceeded
+        while msg.len() > MAX_NET_DATA_SIZE {
+            let _ = txs.pop();
+
+            let new_msg = Message::TxDownloadResponse(txs.clone());
+            msg = serialize(&new_msg).unwrap();
+        }
+
+        self.net_driver
+            .lock()
+            .unwrap()
+            .send_custom_message(conn_index, msg);
+    }
+
+    fn handle_tx_download_response(&mut self, txs: Vec<Tx>) {
+        if txs.is_empty() {
+            return;
+        }
+
+        // Checking if the blockchain is not empty
+        let Some(current_height) = self.get_height() else {
+            return;
+        };
+
+        // For each transaction
+        for tx in txs {
+            // Checking that it is not in the UTX pool yet and is valid
+            if !self.utx_pool.iter().any(|(inner_tx, _)| tx == *inner_tx)
+                && tx.validate(self, current_height)
+            {
+                // Adding the transaction to the UTX pool
+                let fee = tx.get_fee(self, current_height).unwrap();
+                self.utx_pool.push((tx, fee));
+            }
+        }
+    }
+
+    fn handle_block_broadcast(&mut self, block: Block) {
+        // Checking if the blockchain is not empty
+        let Some(current_height) = self.get_height() else {
+            if self.fast_forward(&[block.clone()]) {
+                self.broadcast_block(block);
+            }
+
+            return;
+        };
+
+        // If the remote and the local blockchains have equal heights
+        // there is no need to continue
+        let last_block_header = &self.blocks.last().unwrap().header;
+        if block.header.prev_hash == last_block_header.prev_hash {
+            return;
+        }
+
+        // If the broadcast block is the next block
+        let last_block_hash = last_block_header.hash();
+        if block.header.prev_hash == last_block_hash {
+            // If the block is valid
+            if block.validate(self, current_height + 1) {
+                // Adding the block to the blockchain
+                // and rebroadcasting it
+                self.blocks.push(block.clone());
+                self.broadcast_block(block);
+            }
+        } else {
+            // Requesting to download missing blocks
+            let hash = self.get_oldest_accidental_fork_block_hash();
+            self.request_block_download(hash);
+        }
+    }
+
+    fn handle_tx_broadcast(&mut self, tx: Tx) {
+        // Checking if the blockchain is not empty
+        let Some(current_height) = self.get_height() else {
+            return;
+        };
+
+        // Checking that it is not in the UTX pool yet and is valid
+        if !self.utx_pool.iter().any(|(inner_tx, _)| tx == *inner_tx)
+            && tx.validate(self, current_height)
+        {
+            // Releasing read-write access to the blockchain
+            self.data_mtx.release();
+
+            // Adding the transaction to the UTX pool
+            self.add_utx(tx.clone());
+
+            // Acquiring read-write access to the blockchain
+            self.data_mtx.acquire();
+
+            // Rebroadcasting the transaction
+            self.broadcast_tx(tx);
+        }
+    }
+
+    fn request_block_download(&mut self, hash: Hash) {
+        let msg = Message::BlockDownloadRequest(hash);
+        let msg = serialize(&msg).unwrap();
+        self.net_driver
+            .lock()
+            .unwrap()
+            .broadcast_custom_message(msg);
+    }
+
+    fn request_tx_download(&mut self, hash: Hash) {
+        let msg = Message::TxDownloadRequest(hash);
+        let msg = serialize(&msg).unwrap();
+        self.net_driver
+            .lock()
+            .unwrap()
+            .broadcast_custom_message(msg);
+    }
+
+    fn broadcast_block(&mut self, block: Block) {
+        let msg = Message::BlockBroadcast(block);
+        let msg = serialize(&msg).unwrap();
+        self.net_driver
+            .lock()
+            .unwrap()
+            .broadcast_custom_message(msg);
+    }
+
+    fn broadcast_tx(&mut self, tx: Tx) {
+        let msg = Message::TxBroadcast(tx);
+        let msg = serialize(&msg).unwrap();
+        self.net_driver
+            .lock()
+            .unwrap()
+            .broadcast_custom_message(msg);
     }
 }
 
@@ -501,7 +972,7 @@ impl BlockHeader {
         header
     }
 
-    fn hash(&self) -> Hash {
+    pub fn hash(&self) -> Hash {
         let mut hasher = SHA256::new();
         hasher.update(self.version.to_be_bytes());
         hasher.update(*self.prev_hash);

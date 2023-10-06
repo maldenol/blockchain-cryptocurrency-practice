@@ -26,13 +26,17 @@ pub struct NetDriver {
     connections_mtx: Semaphore,
     connections_to_remove: Vec<usize>,
     addresses_to_connect: Mutex<Vec<SocketAddr>>,
+    custom_message_handler: Mutex<Option<CustomMessageHandler>>,
 }
 
 #[derive(Serialize, Deserialize)]
 enum NetMsg {
     AddressesRequest,
     AddressesResponse(Vec<SocketAddr>),
+    Custom(Vec<u8>),
 }
+
+type CustomMessageHandler = Box<dyn FnMut(usize, Vec<u8>)>;
 
 impl NetDriver {
     pub fn new(listen_addr: SocketAddr) -> Box<Self> {
@@ -47,6 +51,7 @@ impl NetDriver {
             connections_mtx: Semaphore::new(1),
             connections_to_remove: Vec::new(),
             addresses_to_connect: Mutex::new(Vec::new()),
+            custom_message_handler: Mutex::new(None),
         });
 
         // Making the listener non-blocking
@@ -292,6 +297,7 @@ impl NetDriver {
                             NetMsg::AddressesResponse(addrs) => {
                                 self.handle_addresses_response(addrs)
                             }
+                            NetMsg::Custom(msg) => self.handle_custom_message(conn_index, msg),
                         }
                     }
                 }
@@ -457,6 +463,34 @@ impl NetDriver {
         self.broadcast(&msg);
     }
 
+    pub fn broadcast_custom_message(&mut self, msg: Vec<u8>) {
+        let msg = NetMsg::Custom(msg);
+        let msg = serialize(&msg).unwrap();
+
+        // Checking that the size of the message is not exceeded
+        if msg.len() > MAX_NET_DATA_SIZE {
+            return;
+        }
+
+        self.connections_mtx.acquire();
+        self.broadcast(&msg);
+        self.connections_mtx.release();
+    }
+
+    pub fn send_custom_message(&mut self, conn_index: usize, msg: Vec<u8>) {
+        let msg = NetMsg::Custom(msg);
+        let msg = serialize(&msg).unwrap();
+
+        // Checking that the size of the message is not exceeded
+        if msg.len() > MAX_NET_DATA_SIZE {
+            return;
+        }
+
+        self.connections_mtx.acquire();
+        self.send(conn_index, &msg);
+        self.connections_mtx.release();
+    }
+
     fn handle_addresses_request(&mut self, conn_index: usize) {
         // Getting addresses for the requesting NetDriver to connect to
         // excluding this NetDriver's and the other NetDriver's addresses
@@ -511,6 +545,23 @@ impl NetDriver {
             // Adding addresses to connect to
             self.add_connections(addrs);
         }
+    }
+
+    fn handle_custom_message(&mut self, conn_index: usize, msg: Vec<u8>) {
+        // If the custom message handler callback is set
+        if let Some(custom_message_handler) = self.custom_message_handler.lock().unwrap().as_mut() {
+            // Pass the message to the custom message handler callback
+            self.connections_mtx.release();
+            (custom_message_handler)(conn_index, msg);
+            self.connections_mtx.acquire();
+        }
+    }
+
+    pub fn set_custom_message_handler(
+        &mut self,
+        custom_message_handler: Option<CustomMessageHandler>,
+    ) {
+        *self.custom_message_handler.lock().unwrap() = custom_message_handler;
     }
 }
 

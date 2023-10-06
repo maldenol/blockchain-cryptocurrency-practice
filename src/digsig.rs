@@ -5,6 +5,8 @@ use k256::ecdsa::{
     Signature, SigningKey, VerifyingKey,
 };
 use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 
 use obj2str::Obj2Str;
 
@@ -16,7 +18,7 @@ pub struct PrivateKey(pub SigningKey);
 #[repr(transparent)]
 pub struct PublicKey(pub VerifyingKey);
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct Signat(pub Signature);
 
@@ -77,6 +79,28 @@ impl Deref for PublicKey {
 impl From<VerifyingKey> for PublicKey {
     fn from(value: VerifyingKey) -> Self {
         PublicKey(value)
+    }
+}
+
+impl Serialize for PublicKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let bytes = self.0.to_sec1_bytes();
+        bytes.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        let verifying_key =
+            VerifyingKey::from_sec1_bytes(&bytes).map_err(serde::de::Error::custom)?;
+        Ok(PublicKey(verifying_key))
     }
 }
 

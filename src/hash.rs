@@ -1,8 +1,10 @@
 use std::ops::Deref;
 
+use serde_derive::{Deserialize, Serialize};
+
 use obj2str::Obj2Str;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct Hash(pub [u8; 32]);
 
