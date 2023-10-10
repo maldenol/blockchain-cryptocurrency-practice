@@ -1,8 +1,11 @@
+//! Merkle tree.
+
 use hmac_sha256::Hash as SHA256;
 
 use crate::hash::Hash;
 use crate::tx::Tx;
 
+/// Builds a Merkle tree from given transactions and returns the value of its root.
 pub fn merkle_root(txs: &[Tx]) -> Hash {
     match txs.len() {
         0 => panic!("List of transactions cannot be empty"),
@@ -24,6 +27,7 @@ pub fn merkle_root(txs: &[Tx]) -> Hash {
     }
 }
 
+/// Returns the value of the parent node given the child ones.
 fn merkle_node(left: &Hash, right: &Hash) -> Hash {
     let mut hasher = SHA256::new();
     hasher.update(**left);

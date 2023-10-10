@@ -1,3 +1,5 @@
+//! Cryptocurrency transactions.
+
 use std::cmp::Ordering;
 use std::mem::{size_of, size_of_val};
 
@@ -12,6 +14,7 @@ use crate::digsig::{PublicKey, Signat};
 use crate::hash::Hash;
 use crate::wallet::Wallet;
 
+/// Cryptocurrency transaction.
 #[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct Tx {
     pub version: u32,
@@ -19,25 +22,36 @@ pub struct Tx {
     pub outputs: Vec<TxOutput>,
 }
 
+/// Transaction input.
 #[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct TxInput {
+    /// The 'TxOutputRef' referencing the 'TxOutput'.
     pub output_ref: TxOutputRef,
+    /// The signature of the whole 'Tx' signed with the private key of the 'TxOutput' receiver.
     pub signature: Option<Signat>,
 }
 
+/// Transaction output.
 #[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct TxOutput {
+    /// The amount of coins being sent.
     pub amount: u64,
+    /// The public key of the 'TxOutput' receiver.
     pub public_key: PublicKey,
 }
 
+/// Transaction output reference.
 #[derive(Clone, PartialEq, Serialize, Deserialize, Obj2Str)]
 pub struct TxOutputRef {
+    /// The 'Hash' of the 'Tx' containing the referenced 'TxOutput'.
     pub tx_hash: Hash,
+    /// The index of the 'TxOutput' in the 'Tx'.
     pub output_index: u32,
 }
 
 impl Tx {
+    /// Returns a 'Hash' of the 'Tx'.
+    /// It is practically impossible for two different transactions to have the same hash.
     pub fn hash(&self) -> Hash {
         let mut hasher = SHA256::new();
         hasher.update(self.version.to_be_bytes());
@@ -53,6 +67,10 @@ impl Tx {
         SHA256::hash(hash.as_slice()).into()
     }
 
+    /// Validates the 'Tx'.
+    /// # Arguments
+    /// * 'blockchain' - The 'Blockchain' instance which the 'Tx' is part of.
+    /// * 'height' - Must be not less than the height of the 'Block' containing the 'Tx'.
     pub fn validate(&self, blockchain: &Blockchain, height: u32) -> bool {
         // Checking if the inputs and the outputs are not empty
         if self.inputs.is_empty() || self.outputs.is_empty() {
@@ -87,6 +105,10 @@ impl Tx {
         self.get_fee(blockchain, height).is_some()
     }
 
+    /// Signs the 'Tx'.
+    /// # Arguments
+    /// * 'blockchain' - The 'Blockchain' instance which the 'Tx' is part of.
+    /// * 'wallet' - The 'Wallet' with the keys.
     pub fn sign(&mut self, blockchain: &Blockchain, wallet: &Wallet) -> bool {
         // If there are no inputs
         if self.inputs.is_empty() {
@@ -116,6 +138,10 @@ impl Tx {
         true
     }
 
+    /// Returns the fee of the 'Tx'.
+    /// # Arguments
+    /// * 'blockchain' - The 'Blockchain' instance which the 'Tx' is part of.
+    /// * 'height' - Must be not less than the height of the 'Block' containing the 'Tx'.
     pub fn get_fee(&self, blockchain: &Blockchain, height: u32) -> Option<u64> {
         // Transaction fee (the sum of all inputs minus the sum of all outputs)
         let mut fee = 0i64;
@@ -143,12 +169,14 @@ impl Tx {
         }
     }
 
+    /// Returns the size of the 'Tx'.
     pub fn get_size(&self) -> usize {
         size_of_val(&self.version)
             + self.inputs.len() * size_of::<TxInput>()
             + self.outputs.len() * size_of::<TxOutput>()
     }
 
+    /// Returns 'TxOutput's of the 'Tx'.
     pub fn get_outputs(&self) -> &[TxOutput] {
         &self.outputs
     }

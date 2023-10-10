@@ -1,3 +1,5 @@
+//! P2P network driver.
+
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{
@@ -15,20 +17,26 @@ use semaphore::{Semaphore, SemaphoreGuard};
 
 use crate::consts::*;
 
+/// P2P network driver.
 pub struct NetDriver {
     is_running: AtomicBool,
     connect_thr: Option<JoinHandle<()>>,
     listen_thr: Option<JoinHandle<()>>,
     respond_thr: Option<JoinHandle<()>>,
     listener: TcpListener,
+    /// The ID of the 'NetDriver'.
     id: u32,
+    /// The tuple of a connection with some peer, the peer's listening port and ID.
     connections: Vec<(TcpStream, u16, u32)>,
     connections_mtx: Semaphore,
+    /// Indexes of bad connections.
     connections_to_remove: Vec<usize>,
+    /// Addresses of peers to connect to.
     addresses_to_connect: Mutex<Vec<SocketAddr>>,
     custom_message_handler: Mutex<Option<CustomMessageHandler>>,
 }
 
+/// Network message.
 #[derive(Serialize, Deserialize)]
 enum NetMsg {
     AddressesRequest,
@@ -39,6 +47,7 @@ enum NetMsg {
 type CustomMessageHandler = Box<dyn FnMut(usize, Vec<u8>)>;
 
 impl NetDriver {
+    /// Returns a newly created 'NetDriver'.
     pub fn new(listen_addr: SocketAddr) -> Box<Self> {
         let mut net_driver = Box::new(NetDriver {
             is_running: AtomicBool::new(true),
@@ -88,6 +97,8 @@ impl NetDriver {
         net_driver
     }
 
+    /// Adds addresses of the peers to connect to.
+    /// Thread-safe.
     pub fn add_connections(&mut self, mut addrs: Vec<SocketAddr>) {
         // Checking if the addrs are not empty
         if addrs.is_empty() {
@@ -114,11 +125,13 @@ impl NetDriver {
         }
     }
 
+    /// Returns the number of connections.
+    /// Thread-unsafe.
     pub fn get_connection_number(&self) -> usize {
-        // Getting the number of connections (thread-unsafe)
         self.connections.len()
     }
 
+    /// Connects to peers.
     fn connect(&mut self) {
         while self.is_running.load(Ordering::Relaxed) {
             let mut addrs = Vec::new();
@@ -196,6 +209,7 @@ impl NetDriver {
         }
     }
 
+    /// Listens for new connections.
     fn listen(&mut self) {
         while self.is_running.load(Ordering::Relaxed) {
             let begin = Instant::now();
@@ -278,6 +292,7 @@ impl NetDriver {
         }
     }
 
+    /// Responds to connections.
     fn respond(&mut self) {
         let mut msg = vec![0; MAX_NET_DATA_SIZE];
 
@@ -311,6 +326,7 @@ impl NetDriver {
         }
     }
 
+    /// Removes bad connections and requests new ones if needed.
     fn update_connections(&mut self) {
         // Sorting and removing duplicates
         self.connections_to_remove.sort_unstable();
@@ -329,6 +345,7 @@ impl NetDriver {
         }
     }
 
+    /// Broadcasts a message.
     fn broadcast(&mut self, msg: &[u8]) {
         // Getting the size of the message
         let msg_size = msg.len() as u32;
@@ -352,6 +369,7 @@ impl NetDriver {
         }
     }
 
+    /// Sends a message.
     fn send(&mut self, conn_index: usize, msg: &[u8]) {
         let conn = &mut self.connections[conn_index].0;
 
@@ -373,6 +391,7 @@ impl NetDriver {
         }
     }
 
+    /// Receives a message.
     fn receive(&mut self, conn_index: usize, msg: &mut [u8]) -> bool {
         let conn = &mut self.connections[conn_index].0;
 
@@ -409,6 +428,7 @@ impl NetDriver {
         }
     }
 
+    /// Sends a message and waits if needed.
     fn wait_send(conn: &mut TcpStream, msg: &[u8]) -> Result<(), ()> {
         if conn.write_all(msg).is_ok() {
             Ok(())
@@ -417,6 +437,7 @@ impl NetDriver {
         }
     }
 
+    /// Receives a message and waits if needed.
     fn wait_receive(conn: &mut TcpStream, msg: &mut [u8]) -> Result<bool, ()> {
         let begin = Instant::now();
 
@@ -443,6 +464,7 @@ impl NetDriver {
         }
     }
 
+    /// Tries to receive a message without waiting.
     fn try_receive(conn: &mut TcpStream, msg: &mut [u8]) -> Result<bool, ()> {
         match conn.read_exact(msg) {
             Ok(_) => Ok(true),
@@ -457,12 +479,15 @@ impl NetDriver {
         }
     }
 
+    /// Requests addresses of peers to connect to.
     fn request_addresses(&mut self) {
         let msg = NetMsg::AddressesRequest;
         let msg = serialize(&msg).unwrap();
         self.broadcast(&msg);
     }
 
+    /// Broadcasts a custom message.
+    /// Thread-safe.
     pub fn broadcast_custom_message(&mut self, msg: Vec<u8>) {
         let msg = NetMsg::Custom(msg);
         let msg = serialize(&msg).unwrap();
@@ -477,6 +502,8 @@ impl NetDriver {
         self.connections_mtx.release();
     }
 
+    /// Sends a custom message.
+    /// Thread-safe.
     pub fn send_custom_message(&mut self, conn_index: usize, msg: Vec<u8>) {
         let msg = NetMsg::Custom(msg);
         let msg = serialize(&msg).unwrap();
@@ -491,6 +518,7 @@ impl NetDriver {
         self.connections_mtx.release();
     }
 
+    /// Handles a peer addresses request.
     fn handle_addresses_request(&mut self, conn_index: usize) {
         // Getting addresses for the requesting NetDriver to connect to
         // excluding this NetDriver's and the other NetDriver's addresses
@@ -537,6 +565,7 @@ impl NetDriver {
         self.send(conn_index, &msg);
     }
 
+    /// Handles a peer addresses response.
     fn handle_addresses_response(&mut self, addrs: Vec<SocketAddr>) {
         // If addrs are not empty
         // and there are not enough connections
@@ -547,6 +576,7 @@ impl NetDriver {
         }
     }
 
+    /// Handles a custom message.
     fn handle_custom_message(&mut self, conn_index: usize, msg: Vec<u8>) {
         // If the custom message handler callback is set
         if let Some(custom_message_handler) = self.custom_message_handler.lock().unwrap().as_mut() {
@@ -557,6 +587,8 @@ impl NetDriver {
         }
     }
 
+    /// Sets a custom messages handler.
+    /// Thread-safe.
     pub fn set_custom_message_handler(
         &mut self,
         custom_message_handler: Option<CustomMessageHandler>,
@@ -566,6 +598,7 @@ impl NetDriver {
 }
 
 impl Drop for NetDriver {
+    /// Joins the running threads.
     fn drop(&mut self) {
         // Joining the connecting, the listening and the responding threads
         self.is_running.store(false, Ordering::Relaxed);

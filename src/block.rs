@@ -1,3 +1,5 @@
+//! Blockchain and blocks.
+
 use std::mem::size_of;
 use std::ops::{DivAssign, MulAssign};
 use std::sync::{Arc, Mutex};
@@ -21,31 +23,41 @@ use crate::wallet::Wallet;
 
 const IMPOSSIBLE_BLOCK_HASH: Hash = Hash([255u8; 32]);
 
+/// Blockchain.
 pub struct Blockchain {
     blocks: Vec<Block>,
+    /// The pool of UTX (Unrecorded 'Tx's).
     utx_pool: Vec<(Tx, u64)>,
+    /// The pool of UTXO (Unspent 'TxOutput's).
     utxo_pool: Vec<TxOutputRef>,
     data_mtx: Semaphore,
     wallet: Arc<Mutex<Wallet>>,
     net_driver: Arc<Mutex<Box<NetDriver>>>,
 }
 
+/// Block.
 #[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct Block {
     header: BlockHeader,
     txs: Vec<Tx>,
 }
 
+/// Block's header.
 #[derive(Clone, Serialize, Deserialize, Obj2Str)]
 pub struct BlockHeader {
     version: u32,
+    /// The 'Hash' of the previous 'Block' (its 'BlockHeader').
     prev_hash: Hash,
+    /// The value of the root of the Merkle tree generated from 'Tx's in the 'Block'.
     merkle_root: Hash,
     timestamp: u64,
+    /// The mining difficulty.
     difficulty: f32,
+    /// The main value being tweaked during mining.
     nonce: u32,
 }
 
+/// Network message.
 #[derive(Serialize, Deserialize)]
 enum Message {
     BlockDownloadRequest(Hash),
@@ -57,6 +69,7 @@ enum Message {
 }
 
 impl Blockchain {
+    /// Returns a newly created 'Blockchain'.
     pub fn new(wallet: Arc<Mutex<Wallet>>, net_driver: Arc<Mutex<Box<NetDriver>>>) -> Self {
         Blockchain {
             blocks: Vec::new(),
@@ -68,6 +81,8 @@ impl Blockchain {
         }
     }
 
+    /// Mines a 'Block'.
+    /// Thread-safe.
     pub fn mine(&mut self) {
         // Acquiring read-write access to the blockchain
         self.data_mtx.acquire();
@@ -141,6 +156,7 @@ impl Blockchain {
         self.data_mtx.release();
     }
 
+    /// Returns the difficulty of the 'Block' based on its height.
     fn calculate_difficulty(&self, height: u32) -> f32 {
         if height == 0 {
             return 1f32;
@@ -165,10 +181,12 @@ impl Blockchain {
         }
     }
 
+    /// Returns the reward for mining a 'Block' based on its height.
     fn calculate_block_reward(height: u32) -> u64 {
         MINING_REWARD / 2u64.pow(height / HALVING_PERIOD)
     }
 
+    /// Returns a coinbase 'Tx' based on the fees and the height of the 'Block'.
     fn generate_coinbase_tx(wallet: &Wallet, fees: u64, height: u32) -> Tx {
         let block_reward = Blockchain::calculate_block_reward(height);
 
@@ -188,6 +206,8 @@ impl Blockchain {
         }
     }
 
+    /// Validates the coinbase 'Tx'
+    /// based on the other transactions in the 'Block' and the height of the 'Block'.
     fn validate_coinbase_tx(&self, coinbase_tx: &Tx, other_txs: &[Tx], height: u32) -> bool {
         // Checking if the inputs and the outputs are not empty
         if coinbase_tx.inputs.is_empty() || coinbase_tx.outputs.is_empty() {
@@ -214,6 +234,8 @@ impl Blockchain {
         block_reward == Blockchain::calculate_block_reward(height) + fees
     }
 
+    /// Returns a tuple of 'Tx's with the biggest fees that can fit in a single 'Block',
+    /// the sum of these fees and indexes in the UTXO pool of UTXO that will be used.
     fn choose_txs_with_fee(&mut self) -> (Vec<Tx>, u64, Vec<usize>) {
         // Checking if the blockchain is not empty
         let Some(current_height) = self.get_height() else {
@@ -276,6 +298,7 @@ impl Blockchain {
         (txs, fees, used_utxo)
     }
 
+    /// Returns a UTXO pool calculated from the beginning based on the height.
     fn calculate_utxo_pool(&self, height: u32) -> Vec<TxOutputRef> {
         // Checking if the blockchain is not empty
         let Some(current_height) = self.get_height() else {
@@ -323,6 +346,7 @@ impl Blockchain {
         utxo_pool
     }
 
+    /// Returns a UTXO pool calculated from the end based on the height.
     fn calculate_utxo_pool_rev(&self, height: u32) -> Vec<TxOutputRef> {
         // Checking if the blockchain is not empty
         let Some(current_height) = self.get_height() else {
@@ -378,6 +402,8 @@ impl Blockchain {
         utxo_pool
     }
 
+    /// Adds a 'Tx' to the UTX pool.
+    /// Thread-safe.
     pub fn add_utx(&mut self, tx: Tx) {
         // Checking if the blockchain is not empty
         let Some(current_height) = self.get_height() else {
@@ -411,6 +437,8 @@ impl Blockchain {
         self.data_mtx.release();
     }
 
+    /// Returns 'Block's in the 'Blockchain'.
+    /// Thread-safe.
     pub fn get_blocks(&self) -> Vec<Block> {
         // Acquiring read-write access to the blockchain
         let _data_mtx = SemaphoreGuard::acquire(&self.data_mtx);
@@ -418,6 +446,8 @@ impl Blockchain {
         self.blocks.clone()
     }
 
+    /// Returns the height of the last 'Block' in the 'Blockchain'.
+    /// Thread-unsafe.
     pub fn get_height(&self) -> Option<u32> {
         if !self.blocks.is_empty() {
             Some((self.blocks.len() - 1) as u32)
@@ -426,6 +456,11 @@ impl Blockchain {
         }
     }
 
+    /// Returns the 'Tx' found in the 'Blockchain' by its 'Hash' with the specified height.
+    /// Thread-unsafe.
+    /// # Arguments
+    /// * 'hash' - The 'Hash' of the 'Tx.
+    /// * 'height' - Must be not less than the height of the 'Block' containing the 'Tx'.
     pub fn get_tx(&self, hash: &Hash, height: u32) -> Option<&Tx> {
         // Searching for the transaction in the blockchain starting from the last block
         // with specific height
@@ -442,11 +477,21 @@ impl Blockchain {
         None
     }
 
+    /// Returns the 'TxOutput' found in the 'Blockchain' by its 'TxOutputRef' with the specified height.
+    /// Thread-unsafe.
+    /// # Arguments
+    /// * 'output_ref' - 'TxOutputRef' referencing the 'TxOutput'.
+    /// * 'height' - Must be not less than the height of the 'Block' containing the 'Tx'.
     pub fn get_tx_output(&self, output_ref: &TxOutputRef, height: u32) -> Option<&TxOutput> {
         let tx = self.get_tx(&output_ref.tx_hash, height)?;
         tx.outputs.get(output_ref.output_index as usize)
     }
 
+    /// Returns whether the 'TxOutput' is an UTXO in the 'Blockchain' with the specified height.
+    /// Thread-unsafe.
+    /// # Arguments
+    /// * 'output_ref' - 'TxOutputRef' referencing the 'TxOutput'.
+    /// * 'height' - Must be not less than the height of the 'Block' containing the 'Tx'.
     pub fn is_utxo(&self, output_ref: &TxOutputRef, height: u32) -> bool {
         // Checking if the blockchain is not empty
         let Some(current_height) = self.get_height() else {
@@ -466,6 +511,10 @@ impl Blockchain {
         }
     }
 
+    /// Returns the first 'Block' with specific 'Hash' and all the 'Block's after him.
+    /// If there is no 'Block' with such 'Hash'
+    /// it returns 'MAX_BLOCKS_PER_DOWNLOAD' of 'Block's from the beginning.
+    /// Thread-unsafe.
     pub fn get_next_blocks(&self, hash: Hash) -> Vec<Block> {
         // Checking if the blockchain is not empty
         if self.get_height().is_none() {
@@ -492,6 +541,10 @@ impl Blockchain {
             .collect()
     }
 
+    /// Returns the 'Hash' of the 'Block'
+    /// that is located 'MAX_ACCIDENTAL_FORK_HEIGHT' 'Block's before the last one.
+    /// If there are no 'Block's at all it returns the 'IMPOSSIBLE_BLOCK_HASH'.
+    /// Thread-unsafe.
     pub fn get_oldest_accidental_fork_block_hash(&self) -> Hash {
         // Checking if the blockchain is not empty
         if self.get_height().is_none() {
@@ -506,6 +559,8 @@ impl Blockchain {
         self.blocks[index].header.hash()
     }
 
+    /// Tries to fast-forward the 'Blockchain' with the given 'Block's.
+    /// Thread-unsafe.
     pub fn fast_forward(&mut self, blocks: &[Block]) -> bool {
         let mut blocks_updated = false;
 
@@ -545,6 +600,8 @@ impl Blockchain {
         blocks_updated
     }
 
+    /// Tries to rebase the 'Blockchain' with the given 'Block's.
+    /// Thread-unsafe.
     pub fn rebase(&mut self, blocks: &[Block]) -> bool {
         // Checking if the blockchain is not empty
         if self.get_height().is_none() {
@@ -612,6 +669,9 @@ impl Blockchain {
         true
     }
 
+    /// Tries to rebase the 'Blockchain' with the given 'Block's
+    /// if the remote and the local genesis blocks are different.
+    /// Thread-unsafe.
     pub fn rebase_root(&mut self, blocks: &[Block]) -> bool {
         // Checking if the blockchain is not empty
         let Some(current_height) = self.get_height() else {
@@ -657,6 +717,8 @@ impl Blockchain {
         true
     }
 
+    /// Handles a network messages.
+    /// Thread-safe.
     pub fn handle_message(&mut self, conn_index: usize, msg: Vec<u8>) {
         // If the message has been deserialized correctly
         if let Ok(msg) = deserialize(&msg) {
@@ -684,6 +746,7 @@ impl Blockchain {
         }
     }
 
+    /// Handles a 'Block' download request.
     fn handle_block_download_request(&mut self, conn_index: usize, hash: Hash) {
         // Checking if the blockchain is not empty
         if self.get_height().is_none() {
@@ -709,6 +772,7 @@ impl Blockchain {
             .send_custom_message(conn_index, msg);
     }
 
+    /// Handles a 'Block' download response.
     fn handle_block_download_response(&mut self, blocks: Vec<Block>) {
         if blocks.is_empty() {
             return;
@@ -724,6 +788,7 @@ impl Blockchain {
         }
     }
 
+    /// Handles a 'Tx' download request.
     fn handle_tx_download_request(&mut self, conn_index: usize, hash: Hash) {
         // Checking if the blockchain is not empty
         if self.get_height().is_none() {
@@ -758,6 +823,7 @@ impl Blockchain {
             .send_custom_message(conn_index, msg);
     }
 
+    /// Handles a 'Tx' download response.
     fn handle_tx_download_response(&mut self, txs: Vec<Tx>) {
         if txs.is_empty() {
             return;
@@ -781,6 +847,7 @@ impl Blockchain {
         }
     }
 
+    /// Handles a 'Block' broadcast.
     fn handle_block_broadcast(&mut self, block: Block) {
         // Checking if the blockchain is not empty
         let Some(current_height) = self.get_height() else {
@@ -815,6 +882,7 @@ impl Blockchain {
         }
     }
 
+    /// Handles a 'Tx' broadcast.
     fn handle_tx_broadcast(&mut self, tx: Tx) {
         // Checking if the blockchain is not empty
         let Some(current_height) = self.get_height() else {
@@ -839,6 +907,7 @@ impl Blockchain {
         }
     }
 
+    /// Requests a 'Block' download.
     fn request_block_download(&mut self, hash: Hash) {
         let msg = Message::BlockDownloadRequest(hash);
         let msg = serialize(&msg).unwrap();
@@ -848,6 +917,7 @@ impl Blockchain {
             .broadcast_custom_message(msg);
     }
 
+    /// Requests a 'Tx' download.
     fn request_tx_download(&mut self, hash: Hash) {
         let msg = Message::TxDownloadRequest(hash);
         let msg = serialize(&msg).unwrap();
@@ -857,6 +927,7 @@ impl Blockchain {
             .broadcast_custom_message(msg);
     }
 
+    /// Broadcasts a 'Block'.
     fn broadcast_block(&mut self, block: Block) {
         let msg = Message::BlockBroadcast(block);
         let msg = serialize(&msg).unwrap();
@@ -866,6 +937,7 @@ impl Blockchain {
             .broadcast_custom_message(msg);
     }
 
+    /// Broadcasts a 'Tx'.
     fn broadcast_tx(&mut self, tx: Tx) {
         let msg = Message::TxBroadcast(tx);
         let msg = serialize(&msg).unwrap();
@@ -877,6 +949,7 @@ impl Blockchain {
 }
 
 impl Block {
+    /// Returns a newly mined 'Block'.
     fn mine(prev_hash: &Hash, difficulty: f32, mut txs: Vec<Tx>) -> Self {
         Block {
             header: BlockHeader::mine(prev_hash, difficulty, &mut txs),
@@ -884,6 +957,10 @@ impl Block {
         }
     }
 
+    /// Validates the 'Block'.
+    /// # Arguments
+    /// * 'blockchain' - The 'Blockchain' instance which the 'Block' is part of.
+    /// * 'height' - The height of the 'Block' in the 'Blockchain'.
     fn validate(&self, blockchain: &Blockchain, height: u32) -> bool {
         // Validating the header
         if !self.header.validate(blockchain, &self.txs, height) {
@@ -915,6 +992,7 @@ impl Block {
         true
     }
 
+    /// Returns the size of the 'Block'.
     fn get_size(&self) -> usize {
         let mut size = size_of::<BlockHeader>();
         for tx in self.txs.iter() {
@@ -923,16 +1001,19 @@ impl Block {
         size
     }
 
+    /// Returns the 'BlockHeader' of the 'Block'.
     pub fn get_header(&self) -> &BlockHeader {
         &self.header
     }
 
+    /// Returns 'Tx's in the 'Block'.
     pub fn get_txs(&self) -> &[Tx] {
         &self.txs
     }
 }
 
 impl BlockHeader {
+    /// Returns a newly mined 'BlockHeader'.
     fn mine(prev_hash: &Hash, difficulty: f32, txs: &mut [Tx]) -> Self {
         // Closure to get current timestamp
         let get_timestamp = || {
@@ -972,6 +1053,7 @@ impl BlockHeader {
         header
     }
 
+    /// Returns a 'Hash' of the 'BlockHeader'.
     pub fn hash(&self) -> Hash {
         let mut hasher = SHA256::new();
         hasher.update(self.version.to_be_bytes());
@@ -984,6 +1066,11 @@ impl BlockHeader {
         SHA256::hash(hash.as_slice()).into()
     }
 
+    /// Validates the 'BlockHeader'.
+    /// # Arguments
+    /// * 'blockchain' - The 'Blockchain' instance which the 'Block' is part of.
+    /// * 'txs' - 'Tx's in the 'Block'.
+    /// * 'height' - The height of the 'Block' in the 'Blockchain'.
     fn validate(&self, blockchain: &Blockchain, txs: &[Tx], height: u32) -> bool {
         // Validating the hash
         if !self.validate_hash() {
@@ -1029,6 +1116,7 @@ impl BlockHeader {
         true
     }
 
+    /// Validates the 'Hash' of the 'BlockHeader'.
     fn validate_hash(&self) -> bool {
         let hash = BigUint::from_bytes_be(&*self.hash());
 
@@ -1038,6 +1126,7 @@ impl BlockHeader {
         hash <= target
     }
 
+    /// Returns the difficulty target corresponding to the given difficulty.
     fn difficulty_to_target(difficulty: f32) -> BigUint {
         let mut max_target = [0u8; 32];
 

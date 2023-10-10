@@ -1,3 +1,5 @@
+//! Secp256k1 + ECDSA wrappers.
+
 use std::ops::Deref;
 
 use k256::ecdsa::{
@@ -10,27 +12,33 @@ use serde_derive::{Deserialize, Serialize};
 
 use obj2str::Obj2Str;
 
+/// Secp256k1 + ECDSA private key wrapper.
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct PrivateKey(pub SigningKey);
 
+/// Secp256k1 + ECDSA public key wrapper.
 #[derive(Clone, PartialEq)]
 #[repr(transparent)]
 pub struct PublicKey(pub VerifyingKey);
 
+/// Secp256k1 + ECDSA signature wrapper.
 #[derive(Clone, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct Signat(pub Signature);
 
 impl PrivateKey {
+    /// Returns a newly created random 'PrivateKey'.
     pub fn random() -> Self {
         SigningKey::random(&mut OsRng).into()
     }
 
+    /// Signs the message with the 'PrivateKey' and returns the signature.
     pub fn sign(&self, msg: &[u8]) -> Signat {
         Signat(self.0.sign(msg))
     }
 
+    /// Returns the appropriate 'PublicKey'.
     pub fn get_public_key(&self) -> PublicKey {
         (*self.verifying_key()).into()
     }
@@ -63,6 +71,7 @@ impl Obj2Str for PrivateKey {
 }
 
 impl PublicKey {
+    /// Verifies the message by the signature.
     pub fn verify(&self, msg: &[u8], signature: &Signat) -> bool {
         self.0.verify(msg, &signature.0).is_ok()
     }

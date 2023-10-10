@@ -1,9 +1,12 @@
+//! SHA-256 hash.
+
 use std::ops::Deref;
 
 use serde_derive::{Deserialize, Serialize};
 
 use obj2str::Obj2Str;
 
+/// SHA-256 hash.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct Hash(pub [u8; 32]);
