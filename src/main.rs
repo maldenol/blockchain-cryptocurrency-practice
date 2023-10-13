@@ -18,12 +18,14 @@ use block::Blockchain;
 use consts::*;
 use digsig::PrivateKey;
 use netdriver::NetDriver;
+use tx::*;
 use wallet::Wallet;
 
 fn main() {
-    // It is better to use them separately
+    // It is better to test them separately
     test_fork_01(); // make MAX_ACCIDENTAL_FORK_HEIGHT 3
     test_fork_02(); // make MAX_ACCIDENTAL_FORK_HEIGHT 1 and MAX_BLOCKS_PER_DOWNLOAD 3
+    test_utx_and_utxo_update_01(); // make MAX_ACCIDENTAL_FORK_HEIGHT 3
     test_network_01();
 }
 
@@ -246,6 +248,166 @@ fn test_fork_02() {
     }
 }
 
+fn test_utx_and_utxo_update_01() {
+    println!("\n\nTEST: UTX and UTXO update 01");
+
+    const INSTANCE_NUMBER: usize = 2;
+
+    let mut wallets = Vec::with_capacity(INSTANCE_NUMBER);
+    let mut blockchains = Vec::with_capacity(INSTANCE_NUMBER);
+    let mut net_drivers = Vec::with_capacity(INSTANCE_NUMBER);
+
+    for index in 0..INSTANCE_NUMBER {
+        let wallet = Arc::new(Mutex::new(Wallet::new()));
+        wallet.lock().unwrap().insert(0, PrivateKey::random());
+        println!("{} {}", index, wallet.lock().unwrap().obj2str(0, 2));
+        wallets.push(Arc::clone(&wallet));
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let net_driver = Arc::new(Mutex::new(NetDriver::new(
+            format!("127.0.0.1:80{:02}", index).parse().unwrap(),
+        )));
+        net_drivers.push(Arc::clone(&net_driver));
+
+        let blockchain = Blockchain::new(wallet, net_driver);
+        blockchains.push(blockchain);
+
+        net_drivers[index]
+            .lock()
+            .unwrap()
+            .set_custom_message_handler(Some(Box::new({
+                let blockchain = unsafe { &mut *(&mut blockchains[index] as *mut Blockchain) };
+                move |conn_index, msg| {
+                    blockchain.handle_message(conn_index, msg);
+                }
+            })));
+    }
+    println!();
+
+    println!("Initial");
+
+    blockchains[0].mine();
+
+    let from = unsafe { &*(&blockchains[0] as *const Blockchain) };
+    let to = unsafe { &mut *(&mut blockchains[1] as *mut Blockchain) };
+    merge(from, to);
+
+    for utx in blockchains[1].get_utx_pool() {
+        blockchains[0].add_utx(utx);
+    }
+
+    show_blockchains(&blockchains);
+    println!();
+
+    println!("TESTING root rebase");
+    add_utx(&mut blockchains[0], &wallets[0].lock().unwrap());
+    blockchains[0].mine();
+
+    println!("0 mined a block");
+    show_blockchains(&blockchains);
+
+    print!("Merging 0 into 1: ");
+    let from = unsafe { &*(&blockchains[0] as *const Blockchain) };
+    let to = unsafe { &mut *(&mut blockchains[1] as *mut Blockchain) };
+    merge(from, to);
+
+    for utx in blockchains[1].get_utx_pool() {
+        blockchains[0].add_utx(utx);
+    }
+
+    show_blockchains(&blockchains);
+    println!();
+
+    assert_utx_and_utxo(&blockchains[0], &blockchains[1]);
+
+    println!("TESTING fast-forward");
+    println!("0 is mining (MAX_ACCIDENTAL_FORK_HEIGHT + 1) blocks");
+    for _ in 0..(MAX_ACCIDENTAL_FORK_HEIGHT + 1) {
+        add_utx(&mut blockchains[0], &wallets[0].lock().unwrap());
+        blockchains[0].mine();
+        print!("* ");
+        let _ = stdout().flush();
+    }
+    println!();
+
+    show_blockchains(&blockchains);
+
+    print!("Merging 0 into 1: ");
+    let from = unsafe { &*(&blockchains[0] as *const Blockchain) };
+    let to = unsafe { &mut *(&mut blockchains[1] as *mut Blockchain) };
+    merge(from, to);
+
+    for utx in blockchains[1].get_utx_pool() {
+        blockchains[0].add_utx(utx);
+    }
+
+    show_blockchains(&blockchains);
+    println!();
+
+    assert_utx_and_utxo(&blockchains[0], &blockchains[1]);
+
+    println!("TESTING rebase (accidental fork)");
+    println!("0 is mining (MAX_ACCIDENTAL_FORK_HEIGHT + 1) blocks");
+    for _ in 0..(MAX_ACCIDENTAL_FORK_HEIGHT + 1) {
+        add_utx(&mut blockchains[0], &wallets[0].lock().unwrap());
+        blockchains[0].mine();
+        print!("* ");
+        let _ = stdout().flush();
+    }
+    println!();
+    println!("1 is mining MAX_ACCIDENTAL_FORK_HEIGHT blocks");
+    for _ in 0..MAX_ACCIDENTAL_FORK_HEIGHT {
+        add_utx(&mut blockchains[1], &wallets[1].lock().unwrap());
+        blockchains[1].mine();
+        print!("* ");
+        let _ = stdout().flush();
+    }
+    println!();
+
+    show_blockchains(&blockchains);
+
+    print!("Merging 0 into 1: ");
+    let from = unsafe { &*(&blockchains[0] as *const Blockchain) };
+    let to = unsafe { &mut *(&mut blockchains[1] as *mut Blockchain) };
+    merge(from, to);
+
+    for utx in blockchains[1].get_utx_pool() {
+        blockchains[0].add_utx(utx);
+    }
+
+    show_blockchains(&blockchains);
+    println!();
+
+    assert_utx_and_utxo(&blockchains[0], &blockchains[1]);
+
+    println!("TESTING rebase (intentional fork)");
+    println!("0 is mining (MAX_ACCIDENTAL_FORK_HEIGHT + 2) blocks");
+    for _ in 0..(MAX_ACCIDENTAL_FORK_HEIGHT + 2) {
+        add_utx(&mut blockchains[0], &wallets[0].lock().unwrap());
+        blockchains[0].mine();
+        print!("* ");
+        let _ = stdout().flush();
+    }
+    println!();
+    println!("1 is mining (MAX_ACCIDENTAL_FORK_HEIGHT + 1) blocks");
+    for _ in 0..(MAX_ACCIDENTAL_FORK_HEIGHT + 1) {
+        add_utx(&mut blockchains[1], &wallets[1].lock().unwrap());
+        blockchains[1].mine();
+        print!("* ");
+        let _ = stdout().flush();
+    }
+    println!();
+
+    show_blockchains(&blockchains);
+
+    print!("Merging 0 into 1: ");
+    let from = unsafe { &*(&blockchains[0] as *const Blockchain) };
+    let to = unsafe { &mut *(&mut blockchains[1] as *mut Blockchain) };
+    merge(from, to);
+
+    show_blockchains(&blockchains);
+}
+
 fn test_network_01() {
     println!("\n\nTEST: NETWORK 01");
 
@@ -373,4 +535,55 @@ fn merge(from: &Blockchain, to: &mut Blockchain) {
             }
         }
     }
+}
+
+fn assert_utx_and_utxo(blockchain_0: &Blockchain, blockchain_1: &Blockchain) {
+    let utx_pool_0 = blockchain_0.get_utx_pool();
+    let utx_pool_1 = blockchain_1.get_utx_pool();
+    let utxo_pool_0 = blockchain_0.get_utxo_pool();
+    let utxo_pool_1 = blockchain_1.get_utxo_pool();
+
+    println!(
+        "UTX (0): {}\nUTX (1): {}",
+        utx_pool_0.obj2str(1, 5),
+        utx_pool_1.obj2str(1, 5)
+    );
+
+    assert!(utx_pool_0.iter().all(|utx_0| utx_pool_1.contains(utx_0)));
+    assert!(utx_pool_1.iter().all(|utx_1| utx_pool_0.contains(utx_1)));
+    println!("UTX pools are identical\n");
+
+    println!(
+        "UTXO (0): {}\nUTXO (1): {}",
+        utxo_pool_0.obj2str(1, 2),
+        utxo_pool_1.obj2str(1, 2)
+    );
+
+    assert!(utxo_pool_0
+        .iter()
+        .all(|utxo_0| utxo_pool_1.contains(utxo_0)));
+    assert!(utxo_pool_1
+        .iter()
+        .all(|utxo_1| utxo_pool_0.contains(utxo_1)));
+    println!("UTXO pools are identical");
+
+    println!("\n");
+}
+
+fn add_utx(blockchain: &mut Blockchain, wallet: &Wallet) {
+    let mut tx = Tx {
+        version: TX_VERSION,
+        inputs: vec![TxInput {
+            output_ref: blockchain.get_utxo_pool()[0].clone(),
+            signature: None,
+        }],
+        outputs: vec![TxOutput {
+            amount: MINING_REWARD,
+            public_key: wallet.get_public_keys()[0].clone(),
+        }],
+    };
+
+    let _ = tx.sign(blockchain, wallet);
+
+    blockchain.add_utx(tx);
 }

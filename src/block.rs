@@ -89,7 +89,7 @@ impl Blockchain {
 
         // If there is no blocks yet, mine the genesis one
         let Some(current_height) = self.get_height() else {
-            self.blocks.push(Block::mine(
+            let block = Block::mine(
                 &IMPOSSIBLE_BLOCK_HASH,
                 self.calculate_difficulty(0),
                 vec![Blockchain::generate_coinbase_tx(
@@ -97,14 +97,15 @@ impl Blockchain {
                     0,
                     0,
                 )],
-            ));
+            );
+            self.add_block(block);
 
             self.data_mtx.release();
             return;
         };
 
         // Choosing transactions with the biggest fees
-        let (mut txs, fees, used_utxo) = self.choose_txs_with_fee();
+        let (mut txs, fees) = self.choose_txs_with_fee();
 
         // Generating a coinbase transaction
         let coinbase_tx =
@@ -130,15 +131,41 @@ impl Blockchain {
             return;
         }
 
-        // Removing used outputs from the UTXO pool
-        for index in used_utxo.iter().rev() {
-            self.utxo_pool.remove(*index);
-        }
+        // Adding the block to the blockchain
+        self.add_block(block.clone());
 
-        // Adding outputs to the UTXO pool
-        for tx in block.txs.iter() {
+        // Broadcasting the block
+        self.broadcast_block(block);
+
+        // Releasing read-write access to the blockchain
+        self.data_mtx.release();
+    }
+
+    /// Adds a 'Block' to the end of the 'Blockchain'.
+    fn add_block(&mut self, block: Block) {
+        // For each transaction in the block
+        for (index, tx) in block.txs.iter().enumerate() {
+            // If it is not a coinbase transaction
+            if index > 0 {
+                // Removing recorded transactions from the UTX pool
+                if let Some(index) = self.utx_pool.iter().position(|(utx, _)| *utx == *tx) {
+                    self.utx_pool.remove(index);
+                }
+
+                // Removing used outputs from the UTXO pool
+                for input in tx.inputs.iter() {
+                    let index = self
+                        .utxo_pool
+                        .iter()
+                        .position(|utxo| *utxo == input.output_ref)
+                        .unwrap();
+                    self.utxo_pool.remove(index);
+                }
+            }
+
+            // Adding outputs to the UTXO pool
             let hash = tx.hash();
-            for output_index in 0..tx.get_outputs().len() {
+            for output_index in 0..tx.outputs.len() {
                 self.utxo_pool.push(TxOutputRef {
                     tx_hash: hash,
                     output_index: output_index as u32,
@@ -147,13 +174,55 @@ impl Blockchain {
         }
 
         // Adding the block to the blockchain
-        self.blocks.push(block.clone());
+        self.blocks.push(block);
+    }
 
-        // Broadcasting the block
-        self.broadcast_block(block);
+    /// Removes and returns the last 'Block' from the 'Blockchain'.
+    fn remove_block(&mut self) -> Block {
+        // Removing the block from the blockchain
+        let block = self.blocks.pop().unwrap();
 
-        // Releasing read-write access to the blockchain
+        let mut new_utxs = Vec::new();
+
+        // For each transaction in the block
+        for (index, tx) in block.txs.iter().enumerate() {
+            // If it is not a coinbase transaction
+            if index > 0 {
+                // Remembering unrecorded transactions
+                new_utxs.push(tx.clone());
+
+                // Adding used outputs to the UTXO pool
+                for input in tx.inputs.iter() {
+                    self.utxo_pool.push(input.output_ref.clone());
+                }
+            }
+
+            // Removing new outputs from the UTXO pool
+            let hash = tx.hash();
+            for output_index in 0..tx.outputs.len() {
+                let index = self
+                    .utxo_pool
+                    .iter()
+                    .position(|utxo| {
+                        *utxo
+                            == TxOutputRef {
+                                tx_hash: hash,
+                                output_index: output_index as u32,
+                            }
+                    })
+                    .unwrap();
+                self.utxo_pool.remove(index);
+            }
+        }
+
+        // Adding unrecorded transactions to the UTX pool
         self.data_mtx.release();
+        for utx in new_utxs {
+            self.add_utx(utx);
+        }
+        self.data_mtx.acquire();
+
+        block
     }
 
     /// Returns the difficulty of the 'Block' based on its height.
@@ -234,22 +303,21 @@ impl Blockchain {
         block_reward == Blockchain::calculate_block_reward(height) + fees
     }
 
-    /// Returns a tuple of 'Tx's with the biggest fees that can fit in a single 'Block',
-    /// the sum of these fees and indexes in the UTXO pool of UTXO that will be used.
-    fn choose_txs_with_fee(&mut self) -> (Vec<Tx>, u64, Vec<usize>) {
+    /// Returns a tuple of 'Tx's with the biggest fees that can fit in a single 'Block'
+    /// and the sum of these fees.
+    fn choose_txs_with_fee(&mut self) -> (Vec<Tx>, u64) {
         // Checking if the blockchain is not empty
         let Some(current_height) = self.get_height() else {
-            return (Vec::new(), 0, Vec::new());
+            return (Vec::new(), 0);
         };
 
         let mut txs = Vec::new();
         let mut fees = 0u64;
-        let mut used_utxo = Vec::new();
 
         let mut mem_available = MAX_BLOCK_SIZE - size_of::<BlockHeader>();
 
         // For each transaction in the UTX pool
-        'utx_pool: for _ in 0..self.utx_pool.len() {
+        for _ in 0..self.utx_pool.len() {
             // Getting the UTX with the biggest fee
             // because the UTX pool is sorted in ascending order
             let (tx, fee) = self.utx_pool.pop().unwrap();
@@ -268,34 +336,12 @@ impl Blockchain {
                 continue;
             }
 
-            // Getting UTXOs used by the transaction
-            let mut inner_used_utxo = Vec::new();
-            for input in tx.inputs.iter() {
-                let index = self
-                    .utxo_pool
-                    .iter()
-                    .position(|utxo| *utxo == input.output_ref);
-
-                // If there is such UTXO in the pool
-                if let Some(index) = index {
-                    // If there is no such UTXO among the used UTXO yet
-                    if !used_utxo.contains(&index) && !inner_used_utxo.contains(&index) {
-                        inner_used_utxo.push(index);
-                    } else {
-                        continue 'utx_pool;
-                    }
-                } else {
-                    continue 'utx_pool;
-                }
-            }
-
-            // Adding transaction, its fee and used UTXO
+            // Adding the transaction and its fee
             txs.push(tx);
             fees += fee;
-            used_utxo.append(&mut inner_used_utxo);
         }
 
-        (txs, fees, used_utxo)
+        (txs, fees)
     }
 
     /// Returns a UTXO pool calculated from the beginning based on the height.
@@ -456,6 +502,24 @@ impl Blockchain {
         }
     }
 
+    /// Returns the UTX pool of the 'Blockchain'.
+    /// Thread-safe.
+    pub fn get_utx_pool(&self) -> Vec<Tx> {
+        // Acquiring read-write access to the blockchain
+        let _data_mtx = SemaphoreGuard::acquire(&self.data_mtx);
+
+        self.utx_pool.iter().map(|(utx, _)| utx).cloned().collect()
+    }
+
+    /// Returns the UTXO pool of the 'Blockchain'.
+    /// Thread-safe.
+    pub fn get_utxo_pool(&self) -> Vec<TxOutputRef> {
+        // Acquiring read-write access to the blockchain
+        let _data_mtx = SemaphoreGuard::acquire(&self.data_mtx);
+
+        self.utxo_pool.clone()
+    }
+
     /// Returns the 'Tx' found in the 'Blockchain' by its 'Hash' with the specified height.
     /// Thread-unsafe.
     /// # Arguments
@@ -571,7 +635,7 @@ impl Blockchain {
                 // If the block is valid
                 if block.validate(self, 0) {
                     // Adding the block to the blockchain
-                    self.blocks.push(block.clone());
+                    self.add_block(block.clone());
                     blocks_updated = true;
                 } else {
                     // Finishing because next blocks are invalid as well
@@ -588,7 +652,7 @@ impl Blockchain {
                 // If the block is valid
                 if block.validate(self, current_height + 1) {
                     // Adding the block to the blockchain
-                    self.blocks.push(block.clone());
+                    self.add_block(block.clone());
                     blocks_updated = true;
                 } else {
                     // Finishing because next blocks are invalid as well
@@ -640,14 +704,17 @@ impl Blockchain {
         }
 
         // Saving the part of the local blockchain that will be replaced
-        let mut old_local_chain = self.blocks.drain(oldest_common_block_height..).collect();
+        let mut old_local_chain = Vec::new();
+        for _ in oldest_common_block_height..self.blocks.len() {
+            old_local_chain.push(self.remove_block());
+        }
 
         // If the genesis block is the oldest common one
         if self.get_height().is_none() {
             // If the new genesis block is valid
             if blocks[0].validate(self, 0) {
                 // Replacing the genesis block with the new one
-                self.blocks.push(blocks[0].clone());
+                self.add_block(blocks[0].clone());
 
                 // Trying to fast-forward the rest of the new blocks
                 let _ = self.fast_forward(&blocks[1..]);
@@ -661,8 +728,14 @@ impl Blockchain {
         let new_local_chain_length = self.blocks.len() - oldest_common_block_height;
         if new_local_chain_length <= local_chain_length {
             // Restoring the changes
-            self.blocks.drain(oldest_common_block_height..);
-            self.blocks.append(&mut old_local_chain);
+            for _ in oldest_common_block_height..self.blocks.len() {
+                let _ = self.remove_block();
+            }
+
+            for block in old_local_chain {
+                self.add_block(block);
+            }
+
             return false;
         }
 
@@ -692,7 +765,10 @@ impl Blockchain {
         }
 
         // Saving the part of the local blockchain that will be replaced
-        let mut old_local_chain = self.blocks.drain(..).collect();
+        let mut old_local_chain = Vec::new();
+        for _ in 0..self.blocks.len() {
+            old_local_chain.push(self.remove_block());
+        }
 
         // Checking that the new genesis block is valid
         if !blocks[0].validate(self, 0) {
@@ -700,7 +776,7 @@ impl Blockchain {
         }
 
         // Replacing the genesis block with the new one
-        self.blocks.push(blocks[0].clone());
+        self.add_block(blocks[0].clone());
 
         // Trying to fast-forward the rest of the new blocks
         let _ = self.fast_forward(&blocks[1..]);
@@ -709,8 +785,14 @@ impl Blockchain {
         let new_local_chain_length = self.blocks.len();
         if new_local_chain_length <= local_chain_length {
             // Restoring the changes
-            self.blocks.drain(..);
-            self.blocks.append(&mut old_local_chain);
+            for _ in 0..self.blocks.len() {
+                let _ = self.remove_block();
+            }
+
+            for block in old_local_chain {
+                self.add_block(block);
+            }
+
             return false;
         }
 
@@ -872,7 +954,7 @@ impl Blockchain {
             if block.validate(self, current_height + 1) {
                 // Adding the block to the blockchain
                 // and rebroadcasting it
-                self.blocks.push(block.clone());
+                self.add_block(block.clone());
                 self.broadcast_block(block);
             }
         } else {
