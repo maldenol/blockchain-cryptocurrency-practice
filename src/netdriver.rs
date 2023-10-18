@@ -16,6 +16,7 @@ use serde_derive::{Deserialize, Serialize};
 use semaphore::{Semaphore, SemaphoreGuard};
 
 use crate::consts::*;
+use crate::database::NetDriverDB;
 
 /// P2P network driver.
 pub struct NetDriver {
@@ -34,6 +35,7 @@ pub struct NetDriver {
     /// Addresses of peers to connect to.
     addresses_to_connect: Mutex<Vec<SocketAddr>>,
     custom_message_handler: Mutex<Option<CustomMessageHandler>>,
+    db: NetDriverDB,
 }
 
 /// Network message.
@@ -48,7 +50,7 @@ type CustomMessageHandler = Box<dyn FnMut(usize, Vec<u8>)>;
 
 impl NetDriver {
     /// Returns a newly created 'NetDriver'.
-    pub fn new(listen_addr: SocketAddr) -> Box<Self> {
+    pub fn new(db_path: String, listen_addr: SocketAddr) -> Box<Self> {
         let mut net_driver = Box::new(NetDriver {
             is_running: AtomicBool::new(true),
             connect_thr: None,
@@ -61,6 +63,7 @@ impl NetDriver {
             connections_to_remove: Vec::new(),
             addresses_to_connect: Mutex::new(Vec::new()),
             custom_message_handler: Mutex::new(None),
+            db: NetDriverDB::new(db_path),
         });
 
         // Making the listener non-blocking
@@ -93,6 +96,11 @@ impl NetDriver {
                 net_driver.respond();
             }
         }));
+
+        // Loading and adding saved addresses of peers
+        if let Some(addrs) = net_driver.db.load() {
+            net_driver.add_connections(addrs);
+        }
 
         net_driver
     }
@@ -598,12 +606,24 @@ impl NetDriver {
 }
 
 impl Drop for NetDriver {
-    /// Joins the running threads.
+    /// Joins the running threads and saves addresses of the peers.
     fn drop(&mut self) {
         // Joining the connecting, the listening and the responding threads
         self.is_running.store(false, Ordering::Relaxed);
         let _ = self.connect_thr.take().unwrap().join();
         let _ = self.listen_thr.take().unwrap().join();
         let _ = self.respond_thr.take().unwrap().join();
+
+        // Saving addresses of the peers
+        let addrs = self
+            .connections
+            .iter()
+            .map(|(conn, port, _)| {
+                (conn.peer_addr().unwrap().ip().to_string() + ":" + port.to_string().as_str())
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        self.db.save(&addrs);
     }
 }

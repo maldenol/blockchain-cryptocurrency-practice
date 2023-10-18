@@ -6,6 +6,7 @@ use k256::ecdsa::{
     signature::{Signer, Verifier},
     Signature, SigningKey, VerifyingKey,
 };
+use k256::FieldBytes;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_derive::{Deserialize, Serialize};
@@ -55,6 +56,28 @@ impl Deref for PrivateKey {
 impl From<SigningKey> for PrivateKey {
     fn from(value: SigningKey) -> Self {
         PrivateKey(value)
+    }
+}
+
+impl Serialize for PrivateKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let bytes = Vec::from(self.0.to_bytes().as_slice());
+        bytes.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PrivateKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        let bytes = FieldBytes::from_slice(&bytes);
+        let signing_key = SigningKey::from_bytes(bytes).map_err(serde::de::Error::custom)?;
+        Ok(PrivateKey(signing_key))
     }
 }
 

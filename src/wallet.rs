@@ -3,6 +3,7 @@
 use obj2str::Obj2Str;
 use obj2str_derive::Obj2Str;
 
+use crate::database::WalletDB;
 use crate::digsig::{PrivateKey, PublicKey};
 
 /// 'Wallet' is a collection of private and according to them public keys
@@ -11,14 +12,28 @@ use crate::digsig::{PrivateKey, PublicKey};
 pub struct Wallet {
     private_keys: Vec<PrivateKey>,
     public_keys: Vec<PublicKey>,
+    db: WalletDB,
 }
 
 impl Wallet {
     /// Returns a newly created 'Wallet'.
-    pub fn new() -> Self {
+    pub fn new(db_path: String) -> Self {
+        // Getting private and public keys from the save file.
+        let db = WalletDB::new(db_path);
+        let (private_keys, public_keys) = if let Some(private_keys) = db.load() {
+            let public_keys = private_keys
+                .iter()
+                .map(|private_key| private_key.get_public_key())
+                .collect();
+            (private_keys, public_keys)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
         Wallet {
-            private_keys: Vec::new(),
-            public_keys: Vec::new(),
+            private_keys,
+            public_keys,
+            db,
         }
     }
 
@@ -81,5 +96,12 @@ impl Wallet {
     /// Returns public keys.
     pub fn get_public_keys(&self) -> &[PublicKey] {
         &self.public_keys
+    }
+}
+
+impl Drop for Wallet {
+    /// Saves private keys.
+    fn drop(&mut self) {
+        self.db.save(&self.private_keys);
     }
 }

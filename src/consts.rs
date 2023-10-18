@@ -44,4 +44,19 @@ pub const NET_LISTEN_TIMEOUT: Duration = Duration::from_millis(5000);
 pub const NET_READ_TIMEOUT: Duration = Duration::from_millis(1000);
 pub const NET_WRITE_TIMEOUT: Duration = Duration::from_millis(1000);
 pub const MAX_NET_DATA_SIZE: usize = 20 * 1024 * 1024;
-pub const MAX_BLOCKS_PER_DOWNLOAD: usize = 100;
+pub const MAX_BLOCKS_PER_DOWNLOAD: u32 = 100;
+
+// Saving constants.
+
+/// The amount of recent blocks to keep in memory.
+pub const RECENT_BLOCK_NUMBER: usize = 1000;
+/// The amount of blocks per single file.
+pub const BLOCK_PER_FILE: u32 = 1000;
+pub const BLOCKCHAIN_SAVE_DIR: &str = "blockchain/";
+pub const BLOCK_FILE_EXTENSION: &str = ".blocks";
+pub const UTXO_FILE_NAME: &str = "current.utxo";
+pub const UTX_FILE_NAME: &str = "current.utx";
+pub const WALLET_SAVE_DIR: &str = "wallet/";
+pub const WALLET_FILE_NAME: &str = "my.wallet";
+pub const NETDRIVER_SAVE_DIR: &str = "netdriver/";
+pub const NETDRIVER_FILE_NAME: &str = "p2p.addresses";

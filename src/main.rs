@@ -1,5 +1,6 @@
 mod block;
 mod consts;
+mod database;
 mod digsig;
 mod hash;
 mod merkle;
@@ -7,6 +8,7 @@ mod netdriver;
 mod tx;
 mod wallet;
 
+use std::fs::remove_dir_all;
 use std::io::{stdout, Write};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
@@ -22,11 +24,15 @@ use tx::*;
 use wallet::Wallet;
 
 fn main() {
-    // It is better to test them separately
+    // Removing databases of tests
+    let _ = remove_dir_all("test_databases");
+
+    // Test them separately
     test_fork_01(); // make MAX_ACCIDENTAL_FORK_HEIGHT 3
     test_fork_02(); // make MAX_ACCIDENTAL_FORK_HEIGHT 1 and MAX_BLOCKS_PER_DOWNLOAD 3
     test_utx_and_utxo_update_01(); // make MAX_ACCIDENTAL_FORK_HEIGHT 3
     test_network_01();
+    test_database_01(); // make BLOCK_PER_FILE 2
 }
 
 fn test_fork_01() {
@@ -39,18 +45,21 @@ fn test_fork_01() {
     let mut net_drivers = Vec::with_capacity(INSTANCE_NUMBER);
 
     for index in 0..INSTANCE_NUMBER {
-        let wallet = Arc::new(Mutex::new(Wallet::new()));
+        let db_path = format!("test_databases/test_fork_01 ({})", index);
+
+        let wallet = Arc::new(Mutex::new(Wallet::new(db_path.clone())));
         wallet.lock().unwrap().insert(0, PrivateKey::random());
         println!("{} {}", index, wallet.lock().unwrap().obj2str(0, 2));
         wallets.push(Arc::clone(&wallet));
 
         #[allow(clippy::arc_with_non_send_sync)]
         let net_driver = Arc::new(Mutex::new(NetDriver::new(
+            db_path.clone(),
             format!("127.0.0.1:80{:02}", index).parse().unwrap(),
         )));
         net_drivers.push(Arc::clone(&net_driver));
 
-        let blockchain = Blockchain::new(wallet, net_driver);
+        let blockchain = Blockchain::new(db_path, wallet, net_driver);
         blockchains.push(blockchain);
 
         net_drivers[index]
@@ -191,18 +200,21 @@ fn test_fork_02() {
     let mut net_drivers = Vec::with_capacity(INSTANCE_NUMBER);
 
     for index in 0..INSTANCE_NUMBER {
-        let wallet = Arc::new(Mutex::new(Wallet::new()));
+        let db_path = format!("test_databases/test_fork_02 ({})", index);
+
+        let wallet = Arc::new(Mutex::new(Wallet::new(db_path.clone())));
         wallet.lock().unwrap().insert(0, PrivateKey::random());
         println!("{} {}", index, wallet.lock().unwrap().obj2str(0, 2));
         wallets.push(Arc::clone(&wallet));
 
         #[allow(clippy::arc_with_non_send_sync)]
         let net_driver = Arc::new(Mutex::new(NetDriver::new(
+            db_path.clone(),
             format!("127.0.0.1:80{:02}", index).parse().unwrap(),
         )));
         net_drivers.push(Arc::clone(&net_driver));
 
-        let blockchain = Blockchain::new(wallet, net_driver);
+        let blockchain = Blockchain::new(db_path, wallet, net_driver);
         blockchains.push(blockchain);
 
         net_drivers[index]
@@ -258,18 +270,21 @@ fn test_utx_and_utxo_update_01() {
     let mut net_drivers = Vec::with_capacity(INSTANCE_NUMBER);
 
     for index in 0..INSTANCE_NUMBER {
-        let wallet = Arc::new(Mutex::new(Wallet::new()));
+        let db_path = format!("test_databases/test_utx_and_utxo_update_01 ({})", index);
+
+        let wallet = Arc::new(Mutex::new(Wallet::new(db_path.clone())));
         wallet.lock().unwrap().insert(0, PrivateKey::random());
         println!("{} {}", index, wallet.lock().unwrap().obj2str(0, 2));
         wallets.push(Arc::clone(&wallet));
 
         #[allow(clippy::arc_with_non_send_sync)]
         let net_driver = Arc::new(Mutex::new(NetDriver::new(
+            db_path.clone(),
             format!("127.0.0.1:80{:02}", index).parse().unwrap(),
         )));
         net_drivers.push(Arc::clone(&net_driver));
 
-        let blockchain = Blockchain::new(wallet, net_driver);
+        let blockchain = Blockchain::new(db_path, wallet, net_driver);
         blockchains.push(blockchain);
 
         net_drivers[index]
@@ -292,7 +307,7 @@ fn test_utx_and_utxo_update_01() {
     let to = unsafe { &mut *(&mut blockchains[1] as *mut Blockchain) };
     merge(from, to);
 
-    for utx in blockchains[1].get_utx_pool() {
+    for (utx, _) in blockchains[1].get_utx_pool() {
         blockchains[0].add_utx(utx);
     }
 
@@ -311,7 +326,7 @@ fn test_utx_and_utxo_update_01() {
     let to = unsafe { &mut *(&mut blockchains[1] as *mut Blockchain) };
     merge(from, to);
 
-    for utx in blockchains[1].get_utx_pool() {
+    for (utx, _) in blockchains[1].get_utx_pool() {
         blockchains[0].add_utx(utx);
     }
 
@@ -337,7 +352,7 @@ fn test_utx_and_utxo_update_01() {
     let to = unsafe { &mut *(&mut blockchains[1] as *mut Blockchain) };
     merge(from, to);
 
-    for utx in blockchains[1].get_utx_pool() {
+    for (utx, _) in blockchains[1].get_utx_pool() {
         blockchains[0].add_utx(utx);
     }
 
@@ -371,7 +386,7 @@ fn test_utx_and_utxo_update_01() {
     let to = unsafe { &mut *(&mut blockchains[1] as *mut Blockchain) };
     merge(from, to);
 
-    for utx in blockchains[1].get_utx_pool() {
+    for (utx, _) in blockchains[1].get_utx_pool() {
         blockchains[0].add_utx(utx);
     }
 
@@ -419,18 +434,21 @@ fn test_network_01() {
     let mut net_drivers = Vec::with_capacity(INSTANCE_NUMBER);
 
     for index in 0..INSTANCE_NUMBER {
-        let wallet = Arc::new(Mutex::new(Wallet::new()));
+        let db_path = format!("test_databases/test_network_01 ({})", index);
+
+        let wallet = Arc::new(Mutex::new(Wallet::new(db_path.clone())));
         wallet.lock().unwrap().insert(0, PrivateKey::random());
         println!("{} {}", index, wallet.lock().unwrap().obj2str(0, 2));
         wallets.push(Arc::clone(&wallet));
 
         #[allow(clippy::arc_with_non_send_sync)]
         let net_driver = Arc::new(Mutex::new(NetDriver::new(
+            db_path.clone(),
             format!("127.0.0.1:80{:02}", index).parse().unwrap(),
         )));
         net_drivers.push(Arc::clone(&net_driver));
 
-        let blockchain = Blockchain::new(wallet, net_driver);
+        let blockchain = Blockchain::new(db_path, wallet, net_driver);
         blockchains.push(blockchain);
 
         net_drivers[index]
@@ -492,22 +510,116 @@ fn test_network_01() {
 
     sleep(Duration::from_secs(10));
 
-    println!("\nResult");
+    println!("Result");
     show_blockchains(&blockchains);
+}
+
+fn test_database_01() {
+    println!("\n\nTEST: DATABASE 01");
+
+    const INSTANCE_NUMBER: usize = 5;
+    const ITERATION_NUMBER: usize = 5;
+    const MINE_NUMBER: usize = 5;
+
+    for iteration_index in 0..ITERATION_NUMBER {
+        let mut wallets = Vec::with_capacity(INSTANCE_NUMBER);
+        let mut blockchains = Vec::with_capacity(INSTANCE_NUMBER);
+        let mut net_drivers = Vec::with_capacity(INSTANCE_NUMBER);
+
+        for index in 0..INSTANCE_NUMBER {
+            let db_path = format!("test_databases/test_database_01 ({})", index);
+
+            let wallet = Arc::new(Mutex::new(Wallet::new(db_path.clone())));
+            wallet.lock().unwrap().insert(0, PrivateKey::random());
+            println!("{} {}", index, wallet.lock().unwrap().obj2str(1, 2));
+            wallets.push(Arc::clone(&wallet));
+
+            #[allow(clippy::arc_with_non_send_sync)]
+            let net_driver = Arc::new(Mutex::new(NetDriver::new(
+                db_path.clone(),
+                format!("127.0.0.1:80{:02}", index).parse().unwrap(),
+            )));
+            net_drivers.push(Arc::clone(&net_driver));
+
+            let blockchain = Blockchain::new(db_path, wallet, net_driver);
+            blockchains.push(blockchain);
+
+            net_drivers[index]
+                .lock()
+                .unwrap()
+                .set_custom_message_handler(Some(Box::new({
+                    let blockchain = unsafe { &mut *(&mut blockchains[index] as *mut Blockchain) };
+                    move |conn_index, msg| {
+                        blockchain.handle_message(conn_index, msg);
+                    }
+                })));
+        }
+        println!();
+
+        for net_driver in net_drivers.iter_mut() {
+            for inner_index in 0..INSTANCE_NUMBER {
+                net_driver.lock().unwrap().add_connections(vec![format!(
+                    "127.0.0.1:80{:02}",
+                    inner_index
+                )
+                .parse()
+                .unwrap()]);
+            }
+        }
+
+        if iteration_index == 0 {
+            for blockchain in blockchains.iter_mut() {
+                blockchain.mine();
+            }
+        }
+
+        println!("Number of connections for each NetDriver:");
+        for net_driver in net_drivers.iter() {
+            println!("{}", net_driver.lock().unwrap().get_connection_number());
+        }
+        println!();
+
+        for mine_index in 0..MINE_NUMBER {
+            use rand::random;
+            let blockchain_index = random::<usize>() % INSTANCE_NUMBER;
+
+            println!(
+                "{} {}'th instance is mining a block",
+                mine_index, blockchain_index
+            );
+
+            println!("Before");
+            show_blockchains(&blockchains);
+
+            add_utx(
+                &mut blockchains[blockchain_index],
+                &wallets[blockchain_index].lock().unwrap(),
+            );
+            blockchains[blockchain_index].mine();
+
+            println!("After");
+            show_blockchains(&blockchains);
+
+            println!();
+        }
+
+        println!("Result {}", iteration_index);
+        show_blockchains(&blockchains);
+        println!();
+    }
 }
 
 fn show_blockchains(blockchains: &[Blockchain]) {
     for blockchain in blockchains.iter() {
         println!(
-            "{} ({})",
+            "{} ({:?})",
             blockchain
-                .get_blocks()
-                .last()
+                .get_last_block()
                 .unwrap()
                 .get_header()
                 .hash()
                 .obj2str(0, 0),
-            blockchain.get_blocks().len()
+            blockchain.get_height()
         );
     }
 }
@@ -517,7 +629,7 @@ fn merge(from: &Blockchain, to: &mut Blockchain) {
     let blocks = from.get_next_blocks(hash);
     let blocks: Vec<_> = blocks
         .iter()
-        .take(MAX_BLOCKS_PER_DOWNLOAD)
+        .take(MAX_BLOCKS_PER_DOWNLOAD as usize)
         .cloned()
         .collect();
 
