@@ -4,16 +4,14 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    Mutex, MutexGuard,
 };
-use std::thread::{spawn, JoinHandle};
-use std::time::Instant;
+use std::thread::{sleep, spawn, JoinHandle};
+use std::time::{Duration, Instant};
 
 use bincode::{deserialize, serialize};
 use rand::random;
 use serde_derive::{Deserialize, Serialize};
-
-use semaphore::{Semaphore, SemaphoreGuard};
 
 use crate::consts::*;
 use crate::database::NetDriverDB;
@@ -27,15 +25,19 @@ pub struct NetDriver {
     listener: TcpListener,
     /// The ID of the 'NetDriver'.
     id: u32,
-    /// The tuple of a connection with some peer, the peer's listening port and ID.
-    connections: Vec<(TcpStream, u16, u32)>,
-    connections_mtx: Semaphore,
-    /// Indexes of bad connections.
-    connections_to_remove: Vec<usize>,
+    connections: Mutex<Vec<Connection>>,
     /// Addresses of peers to connect to.
     addresses_to_connect: Mutex<Vec<SocketAddr>>,
     custom_message_handler: Mutex<Option<CustomMessageHandler>>,
     db: NetDriverDB,
+}
+
+/// P2P connection.
+pub struct Connection {
+    socket: TcpStream,
+    port: u16,
+    id: u32,
+    alive: bool,
 }
 
 /// Network message.
@@ -46,7 +48,7 @@ enum NetMsg {
     Custom(Vec<u8>),
 }
 
-type CustomMessageHandler = Box<dyn FnMut(usize, Vec<u8>)>;
+type CustomMessageHandler = Box<dyn FnMut(&mut [Connection], usize, Vec<u8>)>;
 
 impl NetDriver {
     /// Returns a newly created 'NetDriver'.
@@ -58,9 +60,7 @@ impl NetDriver {
             respond_thr: None,
             listener: TcpListener::bind(listen_addr).unwrap(),
             id: random::<u32>(),
-            connections: Vec::new(),
-            connections_mtx: Semaphore::new(1),
-            connections_to_remove: Vec::new(),
+            connections: Mutex::new(Vec::new()),
             addresses_to_connect: Mutex::new(Vec::new()),
             custom_message_handler: Mutex::new(None),
             db: NetDriverDB::new(db_path),
@@ -106,37 +106,47 @@ impl NetDriver {
     }
 
     /// Adds addresses of the peers to connect to.
-    /// Thread-safe.
-    pub fn add_connections(&mut self, mut addrs: Vec<SocketAddr>) {
+    fn _add_connections(
+        addresses_to_connect: &mut Vec<SocketAddr>,
+        listener: &TcpListener,
+        mut addrs: Vec<SocketAddr>,
+    ) {
         // Checking if the addrs are not empty
         if addrs.is_empty() {
             return;
         }
 
         // Removing own addresses
-        let local_addr = self.listener.local_addr().unwrap();
+        let local_addr = listener.local_addr().unwrap();
         addrs.retain(|addr| *addr != local_addr);
 
         // Removing duplicates
         addrs.sort_unstable();
         addrs.dedup();
 
-        {
-            let mut addrs_to_connect = self.addresses_to_connect.lock().unwrap();
+        // Adding addresses to the vector for the connecting thread to connect to
+        addresses_to_connect.append(&mut addrs);
 
-            // Adding addresses to the vector for the connecting thread to connect to
-            addrs_to_connect.append(&mut addrs);
+        // Sorting the vector and removing duplicates
+        addresses_to_connect.sort_unstable();
+        addresses_to_connect.dedup();
+    }
 
-            // Sorting the vector and removing duplicates
-            addrs_to_connect.sort_unstable();
-            addrs_to_connect.dedup();
-        }
+    /// Public variant of the private method.
+    pub fn add_connections(&mut self, addrs: Vec<SocketAddr>) {
+        let mut addresses_to_connect = self.addresses_to_connect.lock().unwrap();
+
+        NetDriver::_add_connections(&mut addresses_to_connect, &self.listener, addrs);
+    }
+
+    /// Returns the connections.
+    pub fn get_connections_mut(&mut self) -> MutexGuard<Vec<Connection>> {
+        self.connections.lock().unwrap()
     }
 
     /// Returns the number of connections.
-    /// Thread-unsafe.
     pub fn get_connection_number(&self) -> usize {
-        self.connections.len()
+        self.connections.lock().unwrap().len()
     }
 
     /// Connects to peers.
@@ -183,11 +193,10 @@ impl NetDriver {
                     }
                     let other_id = u32::from_be_bytes(other_id);
 
-                    // Acquiring read-write access to the connections
-                    let _connections_mtx = SemaphoreGuard::acquire(&self.connections_mtx);
+                    let mut connections = self.connections.lock().unwrap();
 
                     // Checking if the number of connections is not exceeded
-                    let connection_number = self.connections.len();
+                    let connection_number = connections.len();
                     if connection_number > MAX_CONNECTION_NUMBER {
                         break;
                     }
@@ -195,10 +204,9 @@ impl NetDriver {
                     // If the other NetDriver's ID doesn't equal to the ID of this one
                     // and there is no connection with the other NetDriver yet
                     if other_id != self.id
-                        && !self
-                            .connections
+                        && !connections
                             .iter()
-                            .any(|(_, _, conn_id)| *conn_id == other_id)
+                            .any(|Connection { id: conn_id, .. }| *conn_id == other_id)
                     {
                         // Sending this NetDriver's listening port
                         let own_listen_port =
@@ -210,11 +218,18 @@ impl NetDriver {
                         let other_listen_port = addr.port();
 
                         // Adding the connection
-                        self.connections.push((conn, other_listen_port, other_id));
+                        connections.push(Connection {
+                            socket: conn,
+                            port: other_listen_port,
+                            id: other_id,
+                            alive: true,
+                        });
                     }
                 }
             }
         }
+
+        sleep(Duration::from_millis(10));
     }
 
     /// Listens for new connections.
@@ -244,11 +259,10 @@ impl NetDriver {
                         }
                         let other_id = u32::from_be_bytes(other_id);
 
-                        // Acquiring read-write access to the connections
-                        let _connections_mtx = SemaphoreGuard::acquire(&self.connections_mtx);
+                        let mut connections = self.connections.lock().unwrap();
 
                         // Checking if the number of connections is not exceeded
-                        let connection_number = self.connections.len();
+                        let connection_number = connections.len();
                         if connection_number > MAX_CONNECTION_NUMBER {
                             break;
                         }
@@ -256,10 +270,9 @@ impl NetDriver {
                         // If the other NetDriver's ID doesn't equal to the ID of this one
                         // and there is no connection with the other NetDriver yet
                         if other_id != self.id
-                            && !self
-                                .connections
+                            && !connections
                                 .iter()
-                                .any(|(_, _, conn_id)| *conn_id == other_id)
+                                .any(|Connection { id: conn_id, .. }| *conn_id == other_id)
                         {
                             // Sending this NetDriver's ID
                             let own_id = self.id.to_be_bytes();
@@ -282,7 +295,12 @@ impl NetDriver {
                             let other_listen_port = u16::from_be_bytes(other_listen_port);
 
                             // Adding the connection
-                            self.connections.push((conn, other_listen_port, other_id));
+                            connections.push(Connection {
+                                socket: conn,
+                                port: other_listen_port,
+                                id: other_id,
+                                alive: true,
+                            });
                         }
                     }
                     Err(err) => {
@@ -305,107 +323,111 @@ impl NetDriver {
         let mut msg = vec![0; MAX_NET_DATA_SIZE];
 
         while self.is_running.load(Ordering::Relaxed) {
-            // Acquiring read-write access to the connections
-            self.connections_mtx.acquire();
+            let mut connections = self.connections.lock().unwrap();
 
             // For each connection
-            for conn_index in 0..self.connections.len() {
+            for conn_index in 0..connections.len() {
                 // If a message has been received
-                if self.receive(conn_index, &mut msg) {
+                if NetDriver::receive(&mut connections, conn_index, &mut msg) {
                     // If the message has been deserialized correctly
                     if let Ok(msg) = deserialize(&msg) {
                         // Handling the message based on its type
                         match msg {
-                            NetMsg::AddressesRequest => self.handle_addresses_request(conn_index),
+                            NetMsg::AddressesRequest => NetDriver::handle_addresses_request(
+                                &mut connections,
+                                &self.listener,
+                                conn_index,
+                            ),
                             NetMsg::AddressesResponse(addrs) => {
-                                self.handle_addresses_response(addrs)
+                                let mut addresses_to_connect =
+                                    self.addresses_to_connect.lock().unwrap();
+                                NetDriver::handle_addresses_response(
+                                    &mut connections,
+                                    &mut addresses_to_connect,
+                                    &self.listener,
+                                    addrs,
+                                )
                             }
-                            NetMsg::Custom(msg) => self.handle_custom_message(conn_index, msg),
+                            NetMsg::Custom(msg) => NetDriver::handle_custom_message(
+                                &self.custom_message_handler,
+                                &mut connections,
+                                conn_index,
+                                msg,
+                            ),
                         }
                     }
                 }
             }
 
             // Updating connections
-            self.update_connections();
-
-            // Releasing read-write access to the connections
-            self.connections_mtx.release();
+            NetDriver::update_connections(&mut connections);
         }
     }
 
     /// Removes bad connections and requests new ones if needed.
-    fn update_connections(&mut self) {
-        // Sorting and removing duplicates
-        self.connections_to_remove.sort_unstable();
-        self.connections_to_remove.dedup();
-
+    fn update_connections(connections: &mut Vec<Connection>) {
         // Removing bad connections
-        for conn_index in self.connections_to_remove.drain(..).rev() {
-            self.connections.remove(conn_index);
-        }
+        connections.retain(|conn| conn.alive);
 
         // If there are not enough connections
-        let connection_number = self.connections.len();
+        let connection_number = connections.len();
         if connection_number < MIN_CONNECTION_NUMBER {
             // Requesting addresses to connect to
-            self.request_addresses();
+            NetDriver::request_addresses(connections);
         }
     }
 
     /// Broadcasts a message.
-    fn broadcast(&mut self, msg: &[u8]) {
+    fn broadcast(connections: &mut [Connection], msg: &[u8]) {
         // Getting the size of the message
         let msg_size = msg.len() as u32;
         let msg_size = msg_size.to_be_bytes();
 
         // For each connection
-        for (conn_index, conn) in self.connections.iter_mut().enumerate() {
-            let conn = &mut conn.0;
-
+        for conn in connections.iter_mut() {
             // Sending the size of the message
-            if NetDriver::wait_send(conn, msg_size.as_slice()).is_err() {
-                self.connections_to_remove.push(conn_index);
+            if NetDriver::wait_send(&mut conn.socket, msg_size.as_slice()).is_err() {
+                conn.alive = false;
                 continue;
             }
 
             // Sending the message
-            if NetDriver::wait_send(conn, msg).is_err() {
-                self.connections_to_remove.push(conn_index);
+            if NetDriver::wait_send(&mut conn.socket, msg).is_err() {
+                conn.alive = false;
                 continue;
             }
         }
     }
 
     /// Sends a message.
-    fn send(&mut self, conn_index: usize, msg: &[u8]) {
-        let conn = &mut self.connections[conn_index].0;
+    fn send(connections: &mut [Connection], conn_index: usize, msg: &[u8]) {
+        let conn = &mut connections[conn_index];
 
         // Getting the size of the message
         let msg_size = msg.len() as u32;
         let msg_size = msg_size.to_be_bytes();
 
         // Sending the size of the message
-        if NetDriver::wait_send(conn, msg_size.as_slice()).is_err() {
+        if NetDriver::wait_send(&mut conn.socket, msg_size.as_slice()).is_err() {
             // Removing the connection on failure
-            self.connections_to_remove.push(conn_index);
+            conn.alive = false;
             return;
         }
 
         // Sending the message
-        if NetDriver::wait_send(conn, msg).is_err() {
+        if NetDriver::wait_send(&mut conn.socket, msg).is_err() {
             // Removing the connection on failure
-            self.connections_to_remove.push(conn_index);
+            conn.alive = false;
         }
     }
 
     /// Receives a message.
-    fn receive(&mut self, conn_index: usize, msg: &mut [u8]) -> bool {
-        let conn = &mut self.connections[conn_index].0;
+    fn receive(connections: &mut [Connection], conn_index: usize, msg: &mut [u8]) -> bool {
+        let conn = &mut connections[conn_index];
 
         // Receiving the size of the message
         let mut msg_size = [0; 4];
-        match NetDriver::try_receive(conn, &mut msg_size) {
+        match NetDriver::try_receive(&mut conn.socket, &mut msg_size) {
             Ok(success) => {
                 if !success {
                     return false;
@@ -413,7 +435,7 @@ impl NetDriver {
             }
             Err(()) => {
                 // Removing the connection on failure
-                self.connections_to_remove.push(conn_index);
+                conn.alive = false;
                 return false;
             }
         }
@@ -426,11 +448,11 @@ impl NetDriver {
 
         // Receiving the message
         let msg = &mut msg[..msg_size];
-        match NetDriver::wait_receive(conn, msg) {
+        match NetDriver::wait_receive(&mut conn.socket, msg) {
             Ok(success) => success,
             Err(()) => {
                 // Removing the connection on failure
-                self.connections_to_remove.push(conn_index);
+                conn.alive = false;
                 false
             }
         }
@@ -488,15 +510,14 @@ impl NetDriver {
     }
 
     /// Requests addresses of peers to connect to.
-    fn request_addresses(&mut self) {
+    fn request_addresses(connections: &mut [Connection]) {
         let msg = NetMsg::AddressesRequest;
         let msg = serialize(&msg).unwrap();
-        self.broadcast(&msg);
+        NetDriver::broadcast(connections, &msg);
     }
 
     /// Broadcasts a custom message.
-    /// Thread-safe.
-    pub fn broadcast_custom_message(&mut self, msg: Vec<u8>) {
+    pub fn broadcast_custom_message(connections: &mut [Connection], msg: Vec<u8>) {
         let msg = NetMsg::Custom(msg);
         let msg = serialize(&msg).unwrap();
 
@@ -505,14 +526,11 @@ impl NetDriver {
             return;
         }
 
-        self.connections_mtx.acquire();
-        self.broadcast(&msg);
-        self.connections_mtx.release();
+        NetDriver::broadcast(connections, &msg);
     }
 
     /// Sends a custom message.
-    /// Thread-safe.
-    pub fn send_custom_message(&mut self, conn_index: usize, msg: Vec<u8>) {
+    pub fn send_custom_message(connections: &mut [Connection], conn_index: usize, msg: Vec<u8>) {
         let msg = NetMsg::Custom(msg);
         let msg = serialize(&msg).unwrap();
 
@@ -521,29 +539,32 @@ impl NetDriver {
             return;
         }
 
-        self.connections_mtx.acquire();
-        self.send(conn_index, &msg);
-        self.connections_mtx.release();
+        NetDriver::send(connections, conn_index, &msg);
     }
 
     /// Handles a peer addresses request.
-    fn handle_addresses_request(&mut self, conn_index: usize) {
+    fn handle_addresses_request(
+        connections: &mut [Connection],
+        listener: &TcpListener,
+        conn_index: usize,
+    ) {
         // Getting addresses for the requesting NetDriver to connect to
         // excluding this NetDriver's and the other NetDriver's addresses
-        let mut addrs: Vec<_> = self
-            .connections
+        let mut addrs: Vec<_> = connections
             .iter()
             .filter_map({
-                let own_addr = self.listener.local_addr().unwrap();
+                let own_addr = listener.local_addr().unwrap();
                 let own_ip = own_addr.ip();
                 let own_port = own_addr.port();
 
-                let other_conn = &self.connections[conn_index].0;
+                let other_conn = &connections[conn_index].socket;
                 let other_addr = other_conn.peer_addr().unwrap();
                 let other_ip = other_addr.ip();
-                let other_port = self.connections[conn_index].1;
+                let other_port = connections[conn_index].port;
 
-                move |(conn, port, _)| {
+                move |Connection {
+                          socket: conn, port, ..
+                      }| {
                     let ip = conn.peer_addr().unwrap().ip();
                     if ip == own_ip && *port == own_port || ip == other_ip && *port == other_port {
                         None
@@ -570,33 +591,40 @@ impl NetDriver {
             msg = serialize(&new_msg).unwrap();
         }
 
-        self.send(conn_index, &msg);
+        NetDriver::send(connections, conn_index, &msg);
     }
 
     /// Handles a peer addresses response.
-    fn handle_addresses_response(&mut self, addrs: Vec<SocketAddr>) {
+    fn handle_addresses_response(
+        connections: &mut [Connection],
+        addresses_to_connect: &mut Vec<SocketAddr>,
+        listener: &TcpListener,
+        addrs: Vec<SocketAddr>,
+    ) {
         // If addrs are not empty
         // and there are not enough connections
-        let connection_number = self.connections.len();
+        let connection_number = connections.len();
         if !addrs.is_empty() && connection_number < MIN_CONNECTION_NUMBER {
             // Adding addresses to connect to
-            self.add_connections(addrs);
+            NetDriver::_add_connections(addresses_to_connect, listener, addrs);
         }
     }
 
     /// Handles a custom message.
-    fn handle_custom_message(&mut self, conn_index: usize, msg: Vec<u8>) {
+    fn handle_custom_message(
+        custom_message_handler: &Mutex<Option<CustomMessageHandler>>,
+        connections: &mut [Connection],
+        conn_index: usize,
+        msg: Vec<u8>,
+    ) {
         // If the custom message handler callback is set
-        if let Some(custom_message_handler) = self.custom_message_handler.lock().unwrap().as_mut() {
+        if let Some(custom_message_handler) = custom_message_handler.lock().unwrap().as_mut() {
             // Pass the message to the custom message handler callback
-            self.connections_mtx.release();
-            (custom_message_handler)(conn_index, msg);
-            self.connections_mtx.acquire();
+            (custom_message_handler)(connections, conn_index, msg);
         }
     }
 
     /// Sets a custom messages handler.
-    /// Thread-safe.
     pub fn set_custom_message_handler(
         &mut self,
         custom_message_handler: Option<CustomMessageHandler>,
@@ -617,12 +645,18 @@ impl Drop for NetDriver {
         // Saving addresses of the peers
         let addrs = self
             .connections
+            .lock()
+            .unwrap()
             .iter()
-            .map(|(conn, port, _)| {
-                (conn.peer_addr().unwrap().ip().to_string() + ":" + port.to_string().as_str())
-                    .parse()
-                    .unwrap()
-            })
+            .map(
+                |Connection {
+                     socket: conn, port, ..
+                 }| {
+                    (conn.peer_addr().unwrap().ip().to_string() + ":" + port.to_string().as_str())
+                        .parse()
+                        .unwrap()
+                },
+            )
             .collect();
         self.db.save(&addrs);
     }

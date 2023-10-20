@@ -13,6 +13,5 @@ obj2str_derive = { version = "1.0.0", path = "obj2str/obj2str_derive" }
 rand = "0.8.5"
 rand_core = "0.6.4"
 rocksdb = "0.21.0"
-semaphore = { version = "1.0.0", path = "semaphore" }
 serde = "1.0.188"
 serde_derive = "1.0.188"

@@ -67,8 +67,8 @@ fn test_fork_01() {
             .unwrap()
             .set_custom_message_handler(Some(Box::new({
                 let blockchain = unsafe { &mut *(&mut blockchains[index] as *mut Blockchain) };
-                move |conn_index, msg| {
-                    blockchain.handle_message(conn_index, msg);
+                move |connections, conn_index, msg| {
+                    blockchain.handle_message(connections, conn_index, msg);
                 }
             })));
     }
@@ -222,8 +222,8 @@ fn test_fork_02() {
             .unwrap()
             .set_custom_message_handler(Some(Box::new({
                 let blockchain = unsafe { &mut *(&mut blockchains[index] as *mut Blockchain) };
-                move |conn_index, msg| {
-                    blockchain.handle_message(conn_index, msg);
+                move |connections, conn_index, msg| {
+                    blockchain.handle_message(connections, conn_index, msg);
                 }
             })));
     }
@@ -292,8 +292,8 @@ fn test_utx_and_utxo_update_01() {
             .unwrap()
             .set_custom_message_handler(Some(Box::new({
                 let blockchain = unsafe { &mut *(&mut blockchains[index] as *mut Blockchain) };
-                move |conn_index, msg| {
-                    blockchain.handle_message(conn_index, msg);
+                move |connections, conn_index, msg| {
+                    blockchain.handle_message(connections, conn_index, msg);
                 }
             })));
     }
@@ -456,8 +456,8 @@ fn test_network_01() {
             .unwrap()
             .set_custom_message_handler(Some(Box::new({
                 let blockchain = unsafe { &mut *(&mut blockchains[index] as *mut Blockchain) };
-                move |conn_index, msg| {
-                    blockchain.handle_message(conn_index, msg);
+                move |connections, conn_index, msg| {
+                    blockchain.handle_message(connections, conn_index, msg);
                 }
             })));
     }
@@ -549,8 +549,8 @@ fn test_database_01() {
                 .unwrap()
                 .set_custom_message_handler(Some(Box::new({
                     let blockchain = unsafe { &mut *(&mut blockchains[index] as *mut Blockchain) };
-                    move |conn_index, msg| {
-                        blockchain.handle_message(conn_index, msg);
+                    move |connections, conn_index, msg| {
+                        blockchain.handle_message(connections, conn_index, msg);
                     }
                 })));
         }
@@ -625,8 +625,8 @@ fn show_blockchains(blockchains: &[Blockchain]) {
 }
 
 fn merge(from: &Blockchain, to: &mut Blockchain) {
-    let hash = to.get_oldest_accidental_fork_block_hash();
-    let blocks = from.get_next_blocks(hash);
+    let hash = to.get_oldest_accidental_fork_block_hash_pub();
+    let blocks = from.get_next_blocks_pub(hash);
     let blocks: Vec<_> = blocks
         .iter()
         .take(MAX_BLOCKS_PER_DOWNLOAD as usize)
@@ -634,13 +634,13 @@ fn merge(from: &Blockchain, to: &mut Blockchain) {
         .collect();
 
     #[allow(clippy::collapsible_else_if)]
-    if to.fast_forward(&blocks) {
+    if to.fast_forward_pub(&blocks) {
         println!("Fast-forwarded");
     } else {
-        if to.rebase(&blocks) {
+        if to.rebase_pub(&blocks) {
             println!("Rebased");
         } else {
-            if to.rebase_root(&blocks) {
+            if to.rebase_root_pub(&blocks) {
                 println!("Rebased genesis");
             } else {
                 println!("No merge");
@@ -695,7 +695,7 @@ fn add_utx(blockchain: &mut Blockchain, wallet: &Wallet) {
         }],
     };
 
-    let _ = tx.sign(blockchain, wallet);
+    let _ = tx.sign(&blockchain.get_db_mut(), wallet);
 
     blockchain.add_utx(tx);
 }

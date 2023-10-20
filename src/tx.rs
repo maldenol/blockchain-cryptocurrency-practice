@@ -10,6 +10,7 @@ use obj2str::Obj2Str;
 use obj2str_derive::Obj2Str;
 
 use crate::block::Blockchain;
+use crate::database::BlockchainDB;
 use crate::digsig::{PublicKey, Signat};
 use crate::hash::Hash;
 use crate::wallet::Wallet;
@@ -71,7 +72,7 @@ impl Tx {
     /// # Arguments
     /// * 'blockchain' - The 'Blockchain' instance which the 'Tx' is part of.
     /// * 'height' - Must be not less than the height of the 'Block' containing the 'Tx'.
-    pub fn validate(&self, blockchain: &Blockchain, height: u32) -> bool {
+    pub fn validate(&self, db: &BlockchainDB, height: u32) -> bool {
         // Checking if the inputs and the outputs are not empty
         if self.inputs.is_empty() || self.outputs.is_empty() {
             return false;
@@ -82,12 +83,12 @@ impl Tx {
             let output_ref = &input.output_ref;
 
             // Checking if the input uses UTXO
-            if !blockchain.is_utxo(output_ref, height) {
+            if !Blockchain::is_utxo(db, output_ref, height) {
                 return false;
             }
 
             // Getting the output by the reference to it
-            let Some(output) = blockchain.get_tx_output(output_ref, height) else {
+            let Some(output) = Blockchain::get_tx_output(db, output_ref, height) else {
                 return false;
             };
 
@@ -102,14 +103,14 @@ impl Tx {
         }
 
         // Checking if the sum of outputs is equal to or less than the sum of inputs
-        self.get_fee(blockchain, height).is_some()
+        self.get_fee(db, height).is_some()
     }
 
     /// Signs the 'Tx'.
     /// # Arguments
     /// * 'blockchain' - The 'Blockchain' instance which the 'Tx' is part of.
     /// * 'wallet' - The 'Wallet' with the keys.
-    pub fn sign(&mut self, blockchain: &Blockchain, wallet: &Wallet) -> bool {
+    pub fn sign(&mut self, db: &BlockchainDB, wallet: &Wallet) -> bool {
         // If there are no inputs
         if self.inputs.is_empty() {
             return false;
@@ -123,7 +124,7 @@ impl Tx {
         for input in self.inputs.iter_mut() {
             // Getting public key from the referenced output
             let Some(output) =
-                blockchain.get_tx_output(&input.output_ref, blockchain.get_height().unwrap())
+                Blockchain::get_tx_output(db, &input.output_ref, db.get_height().unwrap())
             else {
                 return false;
             };
@@ -142,13 +143,13 @@ impl Tx {
     /// # Arguments
     /// * 'blockchain' - The 'Blockchain' instance which the 'Tx' is part of.
     /// * 'height' - Must be not less than the height of the 'Block' containing the 'Tx'.
-    pub fn get_fee(&self, blockchain: &Blockchain, height: u32) -> Option<u64> {
+    pub fn get_fee(&self, db: &BlockchainDB, height: u32) -> Option<u64> {
         // Transaction fee (the sum of all inputs minus the sum of all outputs)
         let mut fee = 0i64;
 
         // For each input
         for input in self.inputs.iter() {
-            let output = blockchain.get_tx_output(&input.output_ref, height)?;
+            let output = Blockchain::get_tx_output(db, &input.output_ref, height)?;
 
             // Add input's amount to the fee
             fee += output.amount as i64;
