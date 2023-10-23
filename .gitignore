@@ -18,6 +18,3 @@ Cargo.lock
 
 # CLion
 .idea/
-
-# Databases used when testing
-test_databases/

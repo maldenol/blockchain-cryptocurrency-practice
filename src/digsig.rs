@@ -13,6 +13,8 @@ use serde_derive::{Deserialize, Serialize};
 
 use obj2str::Obj2Str;
 
+use crate::utils::hex_to_bytes;
+
 /// Secp256k1 + ECDSA private key wrapper.
 #[derive(Clone)]
 #[repr(transparent)]
@@ -29,6 +31,23 @@ pub struct PublicKey(pub VerifyingKey);
 pub struct Signat(pub Signature);
 
 impl PrivateKey {
+    /// Returns a 'PrivateKey' initialized with bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if let Ok(private_key) = SigningKey::from_bytes(bytes.into()) {
+            Some(private_key.into())
+        } else {
+            None
+        }
+    }
+
+    /// Returns a 'PrivateKey' initialized with string of hex-string.
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        let mut bytes = [0u8; 32];
+        hex_to_bytes(hex, &mut bytes).ok()?;
+
+        PrivateKey::from_bytes(&bytes)
+    }
+
     /// Returns a newly created random 'PrivateKey'.
     pub fn random() -> Self {
         SigningKey::random(&mut OsRng).into()
@@ -94,6 +113,23 @@ impl Obj2Str for PrivateKey {
 }
 
 impl PublicKey {
+    /// Returns a 'PublicKey' initialized with bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if let Ok(public_key) = VerifyingKey::from_sec1_bytes(bytes) {
+            Some(public_key.into())
+        } else {
+            None
+        }
+    }
+
+    /// Returns a 'PrivateKey' initialized with string of hex-string.
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        let mut bytes = [0u8; 33];
+        hex_to_bytes(hex, &mut bytes).ok()?;
+
+        PublicKey::from_bytes(&bytes)
+    }
+
     /// Verifies the message by the signature.
     pub fn verify(&self, msg: &[u8], signature: &Signat) -> bool {
         self.0.verify(msg, &signature.0).is_ok()

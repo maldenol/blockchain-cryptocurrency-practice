@@ -176,11 +176,6 @@ impl Tx {
             + self.inputs.len() * size_of::<TxInput>()
             + self.outputs.len() * size_of::<TxOutput>()
     }
-
-    /// Returns 'TxOutput's of the 'Tx'.
-    pub fn get_outputs(&self) -> &[TxOutput] {
-        &self.outputs
-    }
 }
 
 impl PartialEq for Tx {

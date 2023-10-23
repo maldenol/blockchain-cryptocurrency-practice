@@ -2,7 +2,8 @@
 
 use std::mem::size_of;
 use std::ops::{DivAssign, MulAssign};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::Ordering;
+use std::sync::{atomic::AtomicBool, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bincode::{deserialize, serialize};
@@ -15,21 +16,18 @@ use obj2str_derive::Obj2Str;
 
 use crate::consts::*;
 use crate::database::BlockchainDB;
+use crate::digsig::PublicKey;
 use crate::hash::Hash;
 use crate::merkle::merkle_root;
 use crate::netdriver::{Connection, NetDriver};
 use crate::tx::*;
-use crate::wallet::Wallet;
 
 const IMPOSSIBLE_BLOCK_HASH: Hash = Hash([255u8; 32]);
 
 /// Blockchain.
-/// It is crucial for 'db' and 'db_mtx' fields to be located before 'net_driver' field
-/// so 'db' and 'db_mtx' live not less than 'net_driver'.
 pub struct Blockchain {
-    wallet: Arc<Mutex<Wallet>>,
-    net_driver: Arc<Mutex<Box<NetDriver>>>,
     db: Mutex<BlockchainDB>,
+    blocks_received: AtomicBool,
 }
 
 /// Block.
@@ -75,20 +73,21 @@ pub type UTXPool = Vec<(Tx, u64)>;
 
 impl Blockchain {
     /// Returns a newly created 'Blockchain'.
-    pub fn new(
-        db_path: String,
-        wallet: Arc<Mutex<Wallet>>,
-        net_driver: Arc<Mutex<Box<NetDriver>>>,
-    ) -> Self {
+    pub fn new(db_path: String) -> Self {
         Blockchain {
-            wallet,
-            net_driver,
             db: Mutex::new(BlockchainDB::new(db_path)),
+            blocks_received: AtomicBool::new(false),
         }
     }
 
     /// Mines a 'Block'.
-    pub fn mine(&mut self) {
+    /// Returns whether it should be restarted.
+    pub fn mine(
+        &mut self,
+        should_mine: &AtomicBool,
+        public_key: PublicKey,
+        net_driver: &mut NetDriver,
+    ) -> bool {
         let prev_hash;
         let difficulty;
         let txs;
@@ -101,26 +100,19 @@ impl Blockchain {
                 let block = Block::mine(
                     &IMPOSSIBLE_BLOCK_HASH,
                     Blockchain::calculate_difficulty(&db, 0),
-                    vec![Blockchain::generate_coinbase_tx(
-                        &self.wallet.lock().unwrap(),
-                        0,
-                        0,
-                    )],
+                    vec![Blockchain::generate_coinbase_tx(&public_key, 0, 0)],
+                    should_mine,
                 );
                 Blockchain::add_block(&mut db, block);
 
-                return;
+                return true;
             };
 
             // Choosing transactions with the biggest fees
             let (mut inner_txs, fees) = Blockchain::choose_txs_with_fee(&db);
 
             // Generating a coinbase transaction
-            let coinbase_tx = Blockchain::generate_coinbase_tx(
-                &self.wallet.lock().unwrap(),
-                fees,
-                current_height,
-            );
+            let coinbase_tx = Blockchain::generate_coinbase_tx(&public_key, fees, current_height);
             inner_txs.insert(0, coinbase_tx);
 
             // Getting the hash of the previous block and a new difficulty
@@ -131,17 +123,26 @@ impl Blockchain {
         }
 
         // Mining a block
-        let block = Block::mine(&prev_hash, difficulty, txs);
+        let block = Block::mine(&prev_hash, difficulty, txs, should_mine);
+
+        // If should not mine
+        if !should_mine.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        // If new blocks were received
+        if self.blocks_received.fetch_and(false, Ordering::Relaxed) {
+            return true;
+        }
 
         {
             // It is crucial to lock 'connections' before 'db' to avoid deadlock.
-            let mut net_driver = self.net_driver.lock().unwrap();
             let mut connections = net_driver.get_connections_mut();
             let mut db = self.db.lock().unwrap();
 
             // Checking that the block is still valid (no blocks were added from another threads)
             if !block.validate(&db, db.get_height().unwrap() + 1) {
-                return;
+                return true;
             }
 
             // Adding the block to the blockchain
@@ -150,6 +151,8 @@ impl Blockchain {
             // Broadcasting the block
             Blockchain::broadcast_block(&mut connections, block);
         }
+
+        true
     }
 
     /// Adds a 'Block' to the end of the 'Blockchain'.
@@ -275,7 +278,7 @@ impl Blockchain {
     }
 
     /// Returns a coinbase 'Tx' based on the fees and the height of the 'Block'.
-    fn generate_coinbase_tx(wallet: &Wallet, fees: u64, height: u32) -> Tx {
+    fn generate_coinbase_tx(public_key: &PublicKey, fees: u64, height: u32) -> Tx {
         let block_reward = Blockchain::calculate_block_reward(height);
 
         Tx {
@@ -289,7 +292,7 @@ impl Blockchain {
             }],
             outputs: vec![TxOutput {
                 amount: block_reward + fees,
-                public_key: wallet.get_public_keys()[0].clone(),
+                public_key: public_key.clone(),
             }],
         }
     }
@@ -494,9 +497,8 @@ impl Blockchain {
     }
 
     /// Public variant of the private method.
-    pub fn add_utx(&mut self, tx: Tx) {
+    pub fn add_utx(&mut self, tx: Tx, net_driver: &mut NetDriver) {
         // It is crucial to lock 'connections' before 'db' to avoid deadlock.
-        let mut net_driver = self.net_driver.lock().unwrap();
         let mut connections = net_driver.get_connections_mut();
         let mut db = self.db.lock().unwrap();
 
@@ -506,17 +508,6 @@ impl Blockchain {
     /// Returns the 'Block' with specific height in the 'Blockchain'.
     pub fn get_block(&self, height: u32) -> Option<Block> {
         self.db.lock().unwrap().get_block(height)
-    }
-
-    /// Returns the last 'Block' in the 'Blockchain'.
-    pub fn get_last_block(&self) -> Option<Block> {
-        let db = self.db.lock().unwrap();
-
-        if let Some(current_height) = db.get_height() {
-            db.get_block(current_height)
-        } else {
-            None
-        }
     }
 
     /// Returns the height of the last 'Block' in the 'Blockchain'.
@@ -619,7 +610,7 @@ impl Blockchain {
     /// Returns the 'Hash' of the 'Block'
     /// that is located 'MAX_ACCIDENTAL_FORK_HEIGHT' 'Block's before the last one.
     /// If there are no 'Block's at all it returns the 'IMPOSSIBLE_BLOCK_HASH'.
-    fn get_oldest_accidental_fork_block_hash(db: &BlockchainDB) -> Hash {
+    pub fn get_oldest_accidental_fork_block_hash(db: &BlockchainDB) -> Hash {
         // Checking if the blockchain is not empty
         let Some(current_height) = db.get_height() else {
             // Returning the impossible block hash
@@ -803,7 +794,6 @@ impl Blockchain {
     }
 
     /// Handles a network messages.
-    /// TODO: remove pub
     pub fn handle_message(
         &mut self,
         connections: &mut [Connection],
@@ -815,6 +805,7 @@ impl Blockchain {
             // It is crucial to lock 'connections' before 'db' to avoid deadlock
             // because here 'connections' are locked before 'db' already.
             let mut db = self.db.lock().unwrap();
+            let blocks_received = &self.blocks_received;
 
             // Handling the message based on its type
             match msg {
@@ -822,7 +813,7 @@ impl Blockchain {
                     Blockchain::handle_block_download_request(&db, connections, conn_index, hash)
                 }
                 Message::BlockDownloadResponse(blocks) => {
-                    Blockchain::handle_block_download_response(&mut db, blocks)
+                    Blockchain::handle_block_download_response(&mut db, blocks, blocks_received)
                 }
                 Message::TxDownloadRequest(hash) => {
                     Blockchain::handle_tx_download_request(&db, connections, conn_index, hash)
@@ -831,7 +822,7 @@ impl Blockchain {
                     Blockchain::handle_tx_download_response(&mut db, txs)
                 }
                 Message::BlockBroadcast(block) => {
-                    Blockchain::handle_block_broadcast(&mut db, connections, block)
+                    Blockchain::handle_block_broadcast(&mut db, connections, block, blocks_received)
                 }
                 Message::TxBroadcast(tx) => {
                     Blockchain::handle_tx_broadcast(&mut db, connections, tx)
@@ -869,7 +860,11 @@ impl Blockchain {
     }
 
     /// Handles a 'Block' download response.
-    fn handle_block_download_response(db: &mut BlockchainDB, blocks: Vec<Block>) {
+    fn handle_block_download_response(
+        db: &mut BlockchainDB,
+        blocks: Vec<Block>,
+        blocks_received: &AtomicBool,
+    ) {
         if blocks.is_empty() {
             return;
         }
@@ -879,9 +874,14 @@ impl Blockchain {
             // If failed trying to rebase
             if !Blockchain::rebase(db, &blocks) {
                 // If failed trying to rebase the genesis block
-                let _ = Blockchain::rebase_root(db, &blocks);
+                if Blockchain::rebase_root(db, &blocks) {
+                    return;
+                }
             }
         }
+
+        // Signaling that blocks were received and the blockchain has been updated
+        blocks_received.store(true, Ordering::Relaxed);
     }
 
     /// Handles a 'Tx' download request.
@@ -957,11 +957,19 @@ impl Blockchain {
     }
 
     /// Handles a 'Block' broadcast.
-    fn handle_block_broadcast(db: &mut BlockchainDB, connections: &mut [Connection], block: Block) {
+    fn handle_block_broadcast(
+        db: &mut BlockchainDB,
+        connections: &mut [Connection],
+        block: Block,
+        blocks_received: &AtomicBool,
+    ) {
         // Checking if the blockchain is not empty
         let Some(current_height) = db.get_height() else {
             if Blockchain::fast_forward(db, &[block.clone()]) {
                 Blockchain::broadcast_block(connections, block);
+
+                // Signaling that a block was received and the blockchain has been updated
+                blocks_received.store(true, Ordering::Relaxed);
             }
 
             return;
@@ -983,6 +991,9 @@ impl Blockchain {
                 // and rebroadcasting it
                 Blockchain::add_block(db, block.clone());
                 Blockchain::broadcast_block(connections, block);
+
+                // Signaling that a block was received and the blockchain has been updated
+                blocks_received.store(true, Ordering::Relaxed);
             }
         } else {
             // Requesting to download missing blocks
@@ -1014,14 +1025,14 @@ impl Blockchain {
     }
 
     /// Requests a 'Block' download.
-    fn request_block_download(connections: &mut [Connection], hash: Hash) {
+    pub fn request_block_download(connections: &mut [Connection], hash: Hash) {
         let msg = Message::BlockDownloadRequest(hash);
         let msg = serialize(&msg).unwrap();
         NetDriver::broadcast_custom_message(connections, msg);
     }
 
     /// Requests a 'Tx' download.
-    fn request_tx_download(connections: &mut [Connection], hash: Hash) {
+    pub fn request_tx_download(connections: &mut [Connection], hash: Hash) {
         let msg = Message::TxDownloadRequest(hash);
         let msg = serialize(&msg).unwrap();
         NetDriver::broadcast_custom_message(connections, msg);
@@ -1040,43 +1051,17 @@ impl Blockchain {
         let msg = serialize(&msg).unwrap();
         NetDriver::broadcast_custom_message(connections, msg);
     }
-
-    /// TODO: remove
-    pub fn get_oldest_accidental_fork_block_hash_pub(&self) -> Hash {
-        let db = self.db.lock().unwrap();
-        Blockchain::get_oldest_accidental_fork_block_hash(&db)
-    }
-
-    /// TODO: remove
-    pub fn get_next_blocks_pub(&self, hash: Hash) -> Vec<Block> {
-        let db = self.db.lock().unwrap();
-        Blockchain::get_next_blocks(&db, hash)
-    }
-
-    /// TODO: remove
-    pub fn fast_forward_pub(&mut self, blocks: &[Block]) -> bool {
-        let mut db = self.db.lock().unwrap();
-        Blockchain::fast_forward(&mut db, blocks)
-    }
-
-    /// TODO: remove
-    pub fn rebase_pub(&mut self, blocks: &[Block]) -> bool {
-        let mut db = self.db.lock().unwrap();
-        Blockchain::rebase(&mut db, blocks)
-    }
-
-    /// TODO: remove
-    pub fn rebase_root_pub(&mut self, blocks: &[Block]) -> bool {
-        let mut db = self.db.lock().unwrap();
-        Blockchain::rebase_root(&mut db, blocks)
-    }
 }
+
+unsafe impl Send for Blockchain {}
+
+unsafe impl Sync for Blockchain {}
 
 impl Block {
     /// Returns a newly mined 'Block'.
-    fn mine(prev_hash: &Hash, difficulty: f32, mut txs: Vec<Tx>) -> Self {
+    fn mine(prev_hash: &Hash, difficulty: f32, mut txs: Vec<Tx>, should_mine: &AtomicBool) -> Self {
         Block {
-            header: BlockHeader::mine(prev_hash, difficulty, &mut txs),
+            header: BlockHeader::mine(prev_hash, difficulty, &mut txs, should_mine),
             txs,
         }
     }
@@ -1138,7 +1123,7 @@ impl Block {
 
 impl BlockHeader {
     /// Returns a newly mined 'BlockHeader'.
-    fn mine(prev_hash: &Hash, difficulty: f32, txs: &mut [Tx]) -> Self {
+    fn mine(prev_hash: &Hash, difficulty: f32, txs: &mut [Tx], should_mine: &AtomicBool) -> Self {
         // Closure to get current timestamp
         let get_timestamp = || {
             SystemTime::now()
@@ -1157,8 +1142,8 @@ impl BlockHeader {
             nonce: 0,
         };
 
-        // While hash of the block is not valid
-        while !header.validate_hash() {
+        // While hash of the block is not valid and still should mine
+        while !header.validate_hash() && should_mine.load(Ordering::Relaxed) {
             // Incrementing nonce until it overflows
             header.nonce = header.nonce.wrapping_add(1);
             if header.nonce == 0 {

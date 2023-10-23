@@ -6,6 +6,8 @@ use serde_derive::{Deserialize, Serialize};
 
 use obj2str::Obj2Str;
 
+use crate::utils::hex_to_bytes;
+
 /// SHA-256 hash.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
@@ -22,6 +24,17 @@ impl Deref for Hash {
 impl From<[u8; 32]> for Hash {
     fn from(value: [u8; 32]) -> Self {
         Hash(value)
+    }
+}
+
+impl TryFrom<&str> for Hash {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let mut hash = [0u8; 32];
+        hex_to_bytes(value, &mut hash)?;
+
+        Ok(Hash(hash))
     }
 }
 

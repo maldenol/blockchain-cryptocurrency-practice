@@ -4,7 +4,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex, MutexGuard,
+    Arc, Mutex, MutexGuard,
 };
 use std::thread::{sleep, spawn, JoinHandle};
 use std::time::{Duration, Instant};
@@ -48,12 +48,12 @@ enum NetMsg {
     Custom(Vec<u8>),
 }
 
-type CustomMessageHandler = Box<dyn FnMut(&mut [Connection], usize, Vec<u8>)>;
+type CustomMessageHandler = Box<dyn FnMut(&mut [Connection], usize, Vec<u8>) + Send>;
 
 impl NetDriver {
     /// Returns a newly created 'NetDriver'.
-    pub fn new(db_path: String, listen_addr: SocketAddr) -> Box<Self> {
-        let mut net_driver = Box::new(NetDriver {
+    pub fn new(db_path: String, listen_addr: SocketAddr) -> Arc<Self> {
+        let net_driver = Arc::new(NetDriver {
             is_running: AtomicBool::new(true),
             connect_thr: None,
             listen_thr: None,
@@ -73,23 +73,26 @@ impl NetDriver {
             }
         }
 
+        let net_driver_ref =
+            unsafe { &mut *(net_driver.as_ref() as *const NetDriver as *mut NetDriver) };
+
         // Spawning a connecting, a listening and a responding threads
-        let net_driver_ptr = net_driver.as_mut() as *mut NetDriver as usize;
-        net_driver.connect_thr = Some(spawn({
+        let net_driver_ptr = net_driver.as_ref() as *const NetDriver as *mut NetDriver as usize;
+        net_driver_ref.connect_thr = Some(spawn({
             let net_driver_ptr = net_driver_ptr;
             move || {
                 let net_driver = unsafe { &mut *(net_driver_ptr as *mut NetDriver) };
                 net_driver.connect();
             }
         }));
-        net_driver.listen_thr = Some(spawn({
+        net_driver_ref.listen_thr = Some(spawn({
             let net_driver_ptr = net_driver_ptr;
             move || {
                 let net_driver = unsafe { &mut *(net_driver_ptr as *mut NetDriver) };
                 net_driver.listen();
             }
         }));
-        net_driver.respond_thr = Some(spawn({
+        net_driver_ref.respond_thr = Some(spawn({
             let net_driver_ptr = net_driver_ptr;
             move || {
                 let net_driver = unsafe { &mut *(net_driver_ptr as *mut NetDriver) };
@@ -99,7 +102,7 @@ impl NetDriver {
 
         // Loading and adding saved addresses of peers
         if let Some(addrs) = net_driver.db.load() {
-            net_driver.add_connections(addrs);
+            net_driver_ref.add_connections(addrs);
         }
 
         net_driver
@@ -139,14 +142,51 @@ impl NetDriver {
         NetDriver::_add_connections(&mut addresses_to_connect, &self.listener, addrs);
     }
 
-    /// Returns the connections.
+    /// Removes connections to peers with specific addresses.
+    pub fn remove_connections(&mut self, addrs: Vec<SocketAddr>) {
+        let mut connections = self.connections.lock().unwrap();
+
+        for conn in connections.iter_mut() {
+            let ip = conn.socket.peer_addr().unwrap().ip();
+            let port = conn.port;
+            let addr = SocketAddr::new(ip, port);
+
+            if addrs.contains(&addr) {
+                conn.alive = false;
+            }
+        }
+
+        NetDriver::update_connections(&mut connections);
+    }
+
+    /// Returns connections to peers.
     pub fn get_connections_mut(&mut self) -> MutexGuard<Vec<Connection>> {
         self.connections.lock().unwrap()
     }
 
-    /// Returns the number of connections.
-    pub fn get_connection_number(&self) -> usize {
-        self.connections.lock().unwrap().len()
+    /// Returns addresses of peers.
+    pub fn get_addresses(&self) -> Vec<SocketAddr> {
+        self.connections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map({
+                let own_addr = self.listener.local_addr().unwrap();
+                let own_ip = own_addr.ip();
+                let own_port = own_addr.port();
+
+                move |Connection {
+                          socket: conn, port, ..
+                      }| {
+                    let ip = conn.peer_addr().unwrap().ip();
+                    if ip == own_ip && *port == own_port {
+                        None
+                    } else {
+                        Some(SocketAddr::new(ip, *port))
+                    }
+                }
+            })
+            .collect()
     }
 
     /// Connects to peers.
@@ -162,7 +202,7 @@ impl NetDriver {
                     continue;
                 }
 
-                addrs.append(&mut *addrs_to_connect);
+                addrs.append(&mut addrs_to_connect);
             }
 
             // For each address
@@ -384,7 +424,7 @@ impl NetDriver {
         let msg_size = msg_size.to_be_bytes();
 
         // For each connection
-        for conn in connections.iter_mut() {
+        for conn in connections {
             // Sending the size of the message
             if NetDriver::wait_send(&mut conn.socket, msg_size.as_slice()).is_err() {
                 conn.alive = false;
@@ -661,3 +701,7 @@ impl Drop for NetDriver {
         self.db.save(&addrs);
     }
 }
+
+unsafe impl Send for NetDriver {}
+
+unsafe impl Sync for NetDriver {}
