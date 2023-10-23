@@ -7,15 +7,12 @@ use std::time::Duration;
 /// 'Block' version.
 pub const BLOCK_VERSION: u32 = 1;
 /// The period of adjusting the mining difficulty (in 'Block's).
-//pub const DIFFICULTY_ADJUSTMENT_PERIOD: u32 = 2_016;
-pub const DIFFICULTY_ADJUSTMENT_PERIOD: u32 = 10;
+pub const DIFFICULTY_ADJUSTMENT_PERIOD: u32 = 20;
 /// The maximum difficulty target ('Hash').
 /// The first two bytes are exponent and the next six are mantissa of the target.
-//pub const MAX_DIFFICULTY_TARGET: u32 = 0x1D00FFFF;
 pub const MAX_DIFFICULTY_TARGET: u32 = 0x21000100;
 /// Target mining time of a single 'Block' (in seconds).
-//pub const BLOCK_MINING_TIME: u32 = 10 * 60;
-pub const BLOCK_MINING_TIME: u32 = 1;
+pub const BLOCK_MINING_TIME: u32 = 15;
 /// Maximum permissible timestamp difference between consecutive 'Block's (in seconds).
 pub const MAX_TIMESTAMP_DELTA: u64 = 24 * 60 * 60 * 1_000_000_000;
 /// Maximum permissible amount of 'Block's that can be rebased during an accidental fork.
