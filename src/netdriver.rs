@@ -1,5 +1,6 @@
 //! P2P network driver.
 
+use std::cell::OnceCell;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{
@@ -19,9 +20,9 @@ use crate::database::NetDriverDB;
 /// P2P network driver.
 pub struct NetDriver {
     is_running: AtomicBool,
-    connect_thr: Option<JoinHandle<()>>,
-    listen_thr: Option<JoinHandle<()>>,
-    respond_thr: Option<JoinHandle<()>>,
+    connect_thr: OnceCell<JoinHandle<()>>,
+    listen_thr: OnceCell<JoinHandle<()>>,
+    respond_thr: OnceCell<JoinHandle<()>>,
     listener: TcpListener,
     /// The ID of the 'NetDriver'.
     id: u32,
@@ -55,9 +56,9 @@ impl NetDriver {
     pub fn new(db_path: String, listen_addr: SocketAddr) -> Arc<Self> {
         let net_driver = Arc::new(NetDriver {
             is_running: AtomicBool::new(true),
-            connect_thr: None,
-            listen_thr: None,
-            respond_thr: None,
+            connect_thr: OnceCell::new(),
+            listen_thr: OnceCell::new(),
+            respond_thr: OnceCell::new(),
             listener: TcpListener::bind(listen_addr).unwrap(),
             id: random::<u32>(),
             connections: Mutex::new(Vec::new()),
@@ -73,36 +74,23 @@ impl NetDriver {
             }
         }
 
-        let net_driver_ref =
-            unsafe { &mut *(net_driver.as_ref() as *const NetDriver as *mut NetDriver) };
-
         // Spawning a connecting, a listening and a responding threads
-        let net_driver_ptr = net_driver.as_ref() as *const NetDriver as *mut NetDriver as usize;
-        net_driver_ref.connect_thr = Some(spawn({
-            let net_driver_ptr = net_driver_ptr;
-            move || {
-                let net_driver = unsafe { &mut *(net_driver_ptr as *mut NetDriver) };
-                net_driver.connect();
-            }
+        let _ = net_driver.connect_thr.set(spawn({
+            let net_driver = Arc::clone(&net_driver);
+            move || net_driver.connect()
         }));
-        net_driver_ref.listen_thr = Some(spawn({
-            let net_driver_ptr = net_driver_ptr;
-            move || {
-                let net_driver = unsafe { &mut *(net_driver_ptr as *mut NetDriver) };
-                net_driver.listen();
-            }
+        let _ = net_driver.listen_thr.set(spawn({
+            let net_driver = Arc::clone(&net_driver);
+            move || net_driver.listen()
         }));
-        net_driver_ref.respond_thr = Some(spawn({
-            let net_driver_ptr = net_driver_ptr;
-            move || {
-                let net_driver = unsafe { &mut *(net_driver_ptr as *mut NetDriver) };
-                net_driver.respond();
-            }
+        let _ = net_driver.respond_thr.set(spawn({
+            let net_driver = Arc::clone(&net_driver);
+            move || net_driver.respond()
         }));
 
         // Loading and adding saved addresses of peers
         if let Some(addrs) = net_driver.db.load() {
-            net_driver_ref.add_connections(addrs);
+            net_driver.add_connections(addrs);
         }
 
         net_driver
@@ -136,14 +124,14 @@ impl NetDriver {
     }
 
     /// Public variant of the private method.
-    pub fn add_connections(&mut self, addrs: Vec<SocketAddr>) {
+    pub fn add_connections(&self, addrs: Vec<SocketAddr>) {
         let mut addresses_to_connect = self.addresses_to_connect.lock().unwrap();
 
         NetDriver::_add_connections(&mut addresses_to_connect, &self.listener, addrs);
     }
 
     /// Removes connections to peers with specific addresses.
-    pub fn remove_connections(&mut self, addrs: Vec<SocketAddr>) {
+    pub fn remove_connections(&self, addrs: Vec<SocketAddr>) {
         let mut connections = self.connections.lock().unwrap();
 
         for conn in connections.iter_mut() {
@@ -160,7 +148,7 @@ impl NetDriver {
     }
 
     /// Returns connections to peers.
-    pub fn get_connections_mut(&mut self) -> MutexGuard<Vec<Connection>> {
+    pub fn get_connections_mut(&self) -> MutexGuard<Vec<Connection>> {
         self.connections.lock().unwrap()
     }
 
@@ -190,7 +178,7 @@ impl NetDriver {
     }
 
     /// Connects to peers.
-    fn connect(&mut self) {
+    fn connect(&self) {
         while self.is_running.load(Ordering::Relaxed) {
             let mut addrs = Vec::new();
 
@@ -273,7 +261,7 @@ impl NetDriver {
     }
 
     /// Listens for new connections.
-    fn listen(&mut self) {
+    fn listen(&self) {
         while self.is_running.load(Ordering::Relaxed) {
             let begin = Instant::now();
 
@@ -359,7 +347,7 @@ impl NetDriver {
     }
 
     /// Responds to connections.
-    fn respond(&mut self) {
+    fn respond(&self) {
         let mut msg = vec![0; MAX_NET_DATA_SIZE];
 
         while self.is_running.load(Ordering::Relaxed) {
@@ -665,10 +653,7 @@ impl NetDriver {
     }
 
     /// Sets a custom messages handler.
-    pub fn set_custom_message_handler(
-        &mut self,
-        custom_message_handler: Option<CustomMessageHandler>,
-    ) {
+    pub fn set_custom_message_handler(&self, custom_message_handler: Option<CustomMessageHandler>) {
         *self.custom_message_handler.lock().unwrap() = custom_message_handler;
     }
 }

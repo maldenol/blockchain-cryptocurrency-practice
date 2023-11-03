@@ -1,6 +1,7 @@
 //! Miscellaneous utilities.
 
 use std::io::{stdin, stdout, Write};
+use std::sync::Arc;
 
 use crate::block::Blockchain;
 use crate::database::BlockchainDB;
@@ -119,7 +120,7 @@ pub fn select_inputs(
 }
 
 /// Returns the availabe amount of coins for specific wallet.
-pub fn get_available_coin_amount(blockchain: &mut Blockchain, wallet: &Wallet) -> u64 {
+pub fn get_available_coin_amount(blockchain: Arc<Blockchain>, wallet: &Wallet) -> u64 {
     let blockchain_db = blockchain.get_db_mut();
 
     let Some(current_height) = blockchain_db.get_height() else {

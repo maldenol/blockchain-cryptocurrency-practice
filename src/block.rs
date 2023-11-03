@@ -3,7 +3,7 @@
 use std::mem::size_of;
 use std::ops::{DivAssign, MulAssign};
 use std::sync::atomic::Ordering;
-use std::sync::{atomic::AtomicBool, Mutex, MutexGuard};
+use std::sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bincode::{deserialize, serialize};
@@ -73,20 +73,34 @@ pub type UTXPool = Vec<(Tx, u64)>;
 
 impl Blockchain {
     /// Returns a newly created 'Blockchain'.
-    pub fn new(db_path: String) -> Self {
-        Blockchain {
+    pub fn new(db_path: String, net_driver: Arc<NetDriver>) -> Arc<Self> {
+        let blockchain = Arc::new(Blockchain {
             db: Mutex::new(BlockchainDB::new(db_path)),
             blocks_received: AtomicBool::new(false),
-        }
+        });
+
+        // Setting the callback for the NetDriver
+        net_driver.set_custom_message_handler(Some(Box::new({
+            let blockchain = Arc::downgrade(&blockchain);
+            move |connections, conn_index, msg| {
+                let Some(blockchain) = blockchain.upgrade() else {
+                    return;
+                };
+
+                blockchain.handle_message(connections, conn_index, msg);
+            }
+        })));
+
+        blockchain
     }
 
     /// Mines a 'Block'.
     /// Returns whether it should be restarted.
     pub fn mine(
-        &mut self,
+        &self,
         should_mine: &AtomicBool,
         public_key: PublicKey,
-        net_driver: &mut NetDriver,
+        net_driver: Arc<NetDriver>,
     ) -> bool {
         let prev_hash;
         let difficulty;
@@ -497,7 +511,7 @@ impl Blockchain {
     }
 
     /// Public variant of the private method.
-    pub fn add_utx(&mut self, tx: Tx, net_driver: &mut NetDriver) {
+    pub fn add_utx(&self, tx: Tx, net_driver: Arc<NetDriver>) {
         // It is crucial to lock 'connections' before 'db' to avoid deadlock.
         let mut connections = net_driver.get_connections_mut();
         let mut db = self.db.lock().unwrap();
@@ -526,7 +540,7 @@ impl Blockchain {
     }
 
     /// Returns the 'BlockchainDB' of the 'Blockchain'.
-    pub fn get_db_mut(&mut self) -> MutexGuard<BlockchainDB> {
+    pub fn get_db_mut(&self) -> MutexGuard<BlockchainDB> {
         self.db.lock().unwrap()
     }
 
@@ -794,12 +808,7 @@ impl Blockchain {
     }
 
     /// Handles a network messages.
-    pub fn handle_message(
-        &mut self,
-        connections: &mut [Connection],
-        conn_index: usize,
-        msg: Vec<u8>,
-    ) {
+    fn handle_message(&self, connections: &mut [Connection], conn_index: usize, msg: Vec<u8>) {
         // If the message has been deserialized correctly
         if let Ok(msg) = deserialize(&msg) {
             // It is crucial to lock 'connections' before 'db' to avoid deadlock

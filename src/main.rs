@@ -15,7 +15,7 @@ use std::io::{stdout, Write};
 use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Weak,
+    Arc, Mutex, Weak,
 };
 use std::thread::{sleep, spawn, JoinHandle};
 use std::time::Duration;
@@ -36,7 +36,8 @@ fn main() {
         ("./".to_string(), "./".to_string(), "./".to_string());
     let mut listen_addr = "0.0.0.0:8000".parse().unwrap();
     let mut peer_addrs = Vec::new();
-    let (mut mine_handle, mut should_mine) = (Arc::new(None), Arc::new(AtomicBool::new(false)));
+    let (mut mine_handle, mut should_mine) =
+        (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
     let mut initial_mine_callback = None;
     let mut quiet = false;
 
@@ -141,30 +142,11 @@ fn main() {
     let net_driver = NetDriver::new(net_driver_save_path, listen_addr);
 
     // Initializing a Blockchain
-    let blockchain = Arc::new(Blockchain::new(blockchain_save_path));
+    let blockchain = Blockchain::new(blockchain_save_path, Arc::clone(&net_driver));
 
-    {
-        let net_driver =
-            unsafe { &mut *(net_driver.as_ref() as *const NetDriver as *mut NetDriver) };
-
-        // Setting the callback for the 'net_driver'
-        net_driver.set_custom_message_handler(Some(Box::new({
-            let blockchain = Arc::downgrade(&blockchain);
-            move |connections, conn_index, msg| {
-                let Some(blockchain) = blockchain.upgrade() else {
-                    return;
-                };
-                let blockchain_ref =
-                    unsafe { &mut *(blockchain.as_ref() as *const Blockchain as *mut Blockchain) };
-
-                blockchain_ref.handle_message(connections, conn_index, msg);
-            }
-        })));
-
-        // Adding peer addresses to connect read from the file
-        if !peer_addrs.is_empty() {
-            net_driver.add_connections(peer_addrs);
-        }
+    // Adding peer addresses to connect read from the file
+    if !peer_addrs.is_empty() {
+        net_driver.add_connections(peer_addrs);
     }
 
     start_updating_blockchain(Arc::downgrade(&blockchain), Arc::downgrade(&net_driver));
@@ -173,11 +155,6 @@ fn main() {
     if let Some(initial_mine_callback) = initial_mine_callback {
         initial_mine_callback(Arc::downgrade(&blockchain), Arc::downgrade(&net_driver));
     }
-
-    let net_driver_ref =
-        unsafe { &mut *(net_driver.as_ref() as *const NetDriver as *mut NetDriver) };
-    let blockchain_ref =
-        unsafe { &mut *(blockchain.as_ref() as *const Blockchain as *mut Blockchain) };
 
     if !quiet {
         println!("Welcome to blockchain-cryptocurrency-practice!");
@@ -223,12 +200,15 @@ fn main() {
                 &wallet,
                 Arc::downgrade(&net_driver),
             ),
-            "s" | "show" => show(&command[1..], blockchain_ref, &wallet),
-            "t" | "transfer" => {
-                coin_transfer_wizard(&command[1..], blockchain_ref, &wallet, net_driver_ref)
-            }
+            "s" | "show" => show(&command[1..], Arc::clone(&blockchain), &wallet),
+            "t" | "transfer" => coin_transfer_wizard(
+                &command[1..],
+                Arc::clone(&blockchain),
+                &wallet,
+                Arc::clone(&net_driver),
+            ),
             "w" | "wallet" => wallet_manager(&command[1..], &mut wallet),
-            "n" | "net" => network_manager(&command[1..], net_driver_ref),
+            "n" | "net" => network_manager(&command[1..], Arc::clone(&net_driver)),
             option => println!("Unknown option \"{}\", use \"help\" to get help", option),
         }
     }
@@ -239,19 +219,18 @@ fn main() {
 }
 
 fn mine(
-    mine_handle: Weak<Option<JoinHandle<()>>>,
+    mine_handle: Weak<Mutex<Option<JoinHandle<()>>>>,
     should_mine: Weak<AtomicBool>,
     blockchain: Weak<Blockchain>,
     wallet: &Wallet,
     net_driver: Weak<NetDriver>,
 ) {
-    let Some(should_mine_ref) = should_mine.upgrade() else {
+    let Some(should_mine) = should_mine.upgrade() else {
         return;
     };
-    let should_mine_ref = should_mine_ref.as_ref();
 
     // If the mining process is running already
-    if should_mine_ref.load(Ordering::Relaxed) {
+    if should_mine.load(Ordering::Relaxed) {
         println!("Are you sure you want to stop the mining process? Y/N");
         let decision = readln(false);
 
@@ -263,7 +242,7 @@ fn mine(
             return;
         }
 
-        finish_mining(mine_handle, should_mine);
+        finish_mining(mine_handle, Arc::downgrade(&should_mine));
         println!("The mining process has just finished");
     } else {
         print!("Enter the hash or the index in the wallet of the public key for mining reward accrual: ");
@@ -286,12 +265,18 @@ fn mine(
             return;
         }
 
-        start_mining(mine_handle, should_mine, blockchain, public_key, net_driver);
+        start_mining(
+            mine_handle,
+            Arc::downgrade(&should_mine),
+            blockchain,
+            public_key,
+            net_driver,
+        );
         println!("The mining process has just started");
     }
 }
 
-fn show(args: &[&str], blockchain: &mut Blockchain, wallet: &Wallet) {
+fn show(args: &[&str], blockchain: Arc<Blockchain>, wallet: &Wallet) {
     let Some(operation) = args.first().copied() else {
         println!("No operation specified");
         return;
@@ -327,7 +312,7 @@ fn show(args: &[&str], blockchain: &mut Blockchain, wallet: &Wallet) {
     }
 }
 
-fn show_blockchain(blockchain: &Blockchain) {
+fn show_blockchain(blockchain: Arc<Blockchain>) {
     let Some(current_height) = blockchain.get_height() else {
         println!("The local blockchain is empty");
         return;
@@ -347,7 +332,7 @@ fn show_blockchain(blockchain: &Blockchain) {
     println!("Number of UTXs:    {}", blockchain.get_utx_pool().len());
 }
 
-fn show_block(args: &[&str], blockchain: &mut Blockchain) {
+fn show_block(args: &[&str], blockchain: Arc<Blockchain>) {
     let Some(part) = args.first().copied() else {
         println!("No block part specified");
         return;
@@ -388,7 +373,7 @@ fn show_block(args: &[&str], blockchain: &mut Blockchain) {
     }
 }
 
-fn show_tx(args: &[&str], blockchain: &mut Blockchain) {
+fn show_tx(args: &[&str], blockchain: Arc<Blockchain>) {
     match args.len() {
         1 => {
             let Some(tx_hash) = args.first().copied() else {
@@ -448,7 +433,7 @@ fn show_tx(args: &[&str], blockchain: &mut Blockchain) {
     };
 }
 
-fn show_utxo(args: &[&str], blockchain: &mut Blockchain, wallet: &Wallet) {
+fn show_utxo(args: &[&str], blockchain: Arc<Blockchain>, wallet: &Wallet) {
     let Some(ownership) = args.first().copied() else {
         println!("No UTXO ownership specified");
         return;
@@ -482,7 +467,7 @@ fn show_utxo(args: &[&str], blockchain: &mut Blockchain, wallet: &Wallet) {
     println!("{}", utxo_pool.obj2str(1, 3));
 }
 
-fn show_utx(args: &[&str], blockchain: &mut Blockchain, wallet: &Wallet) {
+fn show_utx(args: &[&str], blockchain: Arc<Blockchain>, wallet: &Wallet) {
     let Some(ownership) = args.first().copied() else {
         println!("No UTX ownership specified");
         return;
@@ -501,9 +486,9 @@ fn show_utx(args: &[&str], blockchain: &mut Blockchain, wallet: &Wallet) {
 
 fn coin_transfer_wizard(
     args: &[&str],
-    blockchain: &mut Blockchain,
+    blockchain: Arc<Blockchain>,
     wallet: &Wallet,
-    net_driver: &mut NetDriver,
+    net_driver: Arc<NetDriver>,
 ) {
     let Some(mode) = args.first().copied() else {
         println!("No mode specified");
@@ -517,7 +502,7 @@ fn coin_transfer_wizard(
     }
 }
 
-fn transfer_manual(blockchain: &mut Blockchain, wallet: &Wallet, net_driver: &mut NetDriver) {
+fn transfer_manual(blockchain: Arc<Blockchain>, wallet: &Wallet, net_driver: Arc<NetDriver>) {
     println!("Coin transfer wizard: manual mode");
     println!("Remember to add change address output!");
 
@@ -610,7 +595,7 @@ fn transfer_manual(blockchain: &mut Blockchain, wallet: &Wallet, net_driver: &mu
             }
             "s" | "sign" => {
                 if tx.sign(&blockchain.get_db_mut(), wallet) {
-                    blockchain.add_utx(tx.clone(), net_driver);
+                    blockchain.add_utx(tx.clone(), Arc::clone(&net_driver));
                     println!("The transaction has been signed and broadcast successfully");
                     println!(
                         "Wait at most {} blocks to be sure it is submitted",
@@ -623,7 +608,7 @@ fn transfer_manual(blockchain: &mut Blockchain, wallet: &Wallet, net_driver: &mu
                 break;
             }
             "a" | "available" => {
-                let cents = get_available_coin_amount(blockchain, wallet);
+                let cents = get_available_coin_amount(Arc::clone(&blockchain), wallet);
                 let coins = cents as f64 / CENTS_IN_COIN as f64;
                 println!("Available coin amount: {:.8}", coins);
             }
@@ -634,7 +619,7 @@ fn transfer_manual(blockchain: &mut Blockchain, wallet: &Wallet, net_driver: &mu
     println!("Quitting the coin transfer wizard");
 }
 
-fn transfer_automatic(blockchain: &mut Blockchain, wallet: &Wallet, net_driver: &mut NetDriver) {
+fn transfer_automatic(blockchain: Arc<Blockchain>, wallet: &Wallet, net_driver: Arc<NetDriver>) {
     println!("Coin transfer wizard: automatic mode");
 
     let mut tx = Tx {
@@ -754,7 +739,7 @@ fn transfer_automatic(blockchain: &mut Blockchain, wallet: &Wallet, net_driver: 
                 }
 
                 if tx.sign(&blockchain.get_db_mut(), wallet) {
-                    blockchain.add_utx(tx.clone(), net_driver);
+                    blockchain.add_utx(tx.clone(), Arc::clone(&net_driver));
                     println!("The transaction has been signed and broadcast successfully");
                     println!(
                         "Wait at most {} blocks to be sure it is submitted",
@@ -767,7 +752,7 @@ fn transfer_automatic(blockchain: &mut Blockchain, wallet: &Wallet, net_driver: 
                 break;
             }
             "a" | "available" => {
-                let cents = get_available_coin_amount(blockchain, wallet);
+                let cents = get_available_coin_amount(Arc::clone(&blockchain), wallet);
                 let coins = cents as f64 / CENTS_IN_COIN as f64;
                 println!("Available coin amount: {:.8}", coins);
             }
@@ -923,7 +908,7 @@ fn wallet_show(args: &[&str], wallet: &mut Wallet) {
     }
 }
 
-fn network_manager(args: &[&str], net_driver: &mut NetDriver) {
+fn network_manager(args: &[&str], net_driver: Arc<NetDriver>) {
     let Some(operation) = args.first().copied() else {
         println!("No operation specified");
         return;
@@ -948,7 +933,7 @@ fn network_manager(args: &[&str], net_driver: &mut NetDriver) {
     }
 }
 
-fn net_add(args: &[&str], net_driver: &mut NetDriver) {
+fn net_add(args: &[&str], net_driver: Arc<NetDriver>) {
     if args.is_empty() {
         println!("No addresses specified");
         return;
@@ -959,7 +944,7 @@ fn net_add(args: &[&str], net_driver: &mut NetDriver) {
     net_driver.add_connections(addrs);
 }
 
-fn net_remove(args: &[&str], net_driver: &mut NetDriver) {
+fn net_remove(args: &[&str], net_driver: Arc<NetDriver>) {
     if args.is_empty() {
         println!("No addresses specified");
         return;
@@ -970,7 +955,7 @@ fn net_remove(args: &[&str], net_driver: &mut NetDriver) {
     net_driver.remove_connections(addrs);
 }
 
-fn net_show(net_driver: &NetDriver) {
+fn net_show(net_driver: Arc<NetDriver>) {
     let addrs = net_driver.get_addresses();
     if addrs.is_empty() {
         println!("No connections");
@@ -983,7 +968,7 @@ fn net_show(net_driver: &NetDriver) {
 }
 
 fn get_block_by_reference(
-    blockchain: &mut Blockchain,
+    blockchain: Arc<Blockchain>,
     block_reference: &str,
 ) -> Option<(u32, Block)> {
     if let Ok(block_height) = u32::from_str(block_reference) {
@@ -1018,18 +1003,14 @@ fn start_updating_blockchain(blockchain: Weak<Blockchain>, net_driver: Weak<NetD
         let Some(net_driver) = net_driver.upgrade() else {
             return;
         };
-        let net_driver_ref =
-            unsafe { &mut *(net_driver.as_ref() as *const NetDriver as *mut NetDriver) };
 
         let Some(blockchain) = blockchain.upgrade() else {
             return;
         };
-        let blockchain_ref =
-            unsafe { &mut *(blockchain.as_ref() as *const Blockchain as *mut Blockchain) };
 
         // It is crucial to lock 'connections' before 'db' to avoid deadlock.
-        let mut connections = net_driver_ref.get_connections_mut();
-        let blockchain_db = blockchain_ref.get_db_mut();
+        let mut connections = net_driver.get_connections_mut();
+        let blockchain_db = blockchain.get_db_mut();
 
         // Requesting latest blocks
         {
@@ -1048,48 +1029,36 @@ fn start_updating_blockchain(blockchain: Weak<Blockchain>, net_driver: Weak<NetD
 }
 
 fn start_mining(
-    mine_handle: Weak<Option<JoinHandle<()>>>,
+    mine_handle: Weak<Mutex<Option<JoinHandle<()>>>>,
     should_mine: Weak<AtomicBool>,
     blockchain: Weak<Blockchain>,
     public_key: PublicKey,
     net_driver: Weak<NetDriver>,
 ) {
-    let Some(should_mine_ref) = should_mine.upgrade() else {
+    let Some(should_mine) = should_mine.upgrade() else {
         return;
     };
-    let should_mine_ref = should_mine_ref.as_ref();
-    should_mine_ref.store(true, Ordering::Relaxed);
+    should_mine.store(true, Ordering::Relaxed);
 
     let Some(mine_handle) = mine_handle.upgrade() else {
         return;
     };
-    let mine_handle_ref = unsafe {
-        &mut *(mine_handle.as_ref() as *const Option<JoinHandle<()>> as *mut Option<JoinHandle<()>>)
-    };
 
-    let _ = mine_handle_ref.insert(spawn(move || {
+    let mut mine_handle = mine_handle.lock().unwrap();
+    let _ = mine_handle.replace(spawn(move || {
         loop {
-            let Some(should_mine) = should_mine.upgrade() else {
-                return;
-            };
-            let should_mine_ref = should_mine.as_ref();
-
             let Some(net_driver) = net_driver.upgrade() else {
                 return;
             };
-            let net_driver_ref =
-                unsafe { &mut *(net_driver.as_ref() as *const NetDriver as *mut NetDriver) };
 
             let Some(blockchain) = blockchain.upgrade() else {
                 return;
             };
-            let blockchain_ref =
-                unsafe { &mut *(blockchain.as_ref() as *const Blockchain as *mut Blockchain) };
 
             // If should mine
-            if should_mine_ref.load(Ordering::Relaxed) {
+            if should_mine.load(Ordering::Relaxed) {
                 // Mining and breaking if don't need to restart
-                if !blockchain_ref.mine(should_mine_ref, public_key.clone(), net_driver_ref) {
+                if !blockchain.mine(&should_mine, public_key.clone(), net_driver) {
                     break;
                 }
             }
@@ -1097,20 +1066,19 @@ fn start_mining(
     }));
 }
 
-fn finish_mining(mine_handle: Weak<Option<JoinHandle<()>>>, should_mine: Weak<AtomicBool>) {
+fn finish_mining(mine_handle: Weak<Mutex<Option<JoinHandle<()>>>>, should_mine: Weak<AtomicBool>) {
+    let Some(mine_handle) = mine_handle.upgrade() else {
+        return;
+    };
+
     let Some(should_mine) = should_mine.upgrade() else {
         return;
     };
 
-    let Some(mine_handle) = mine_handle.upgrade() else {
-        return;
-    };
-    let mine_handle_ref = unsafe {
-        &mut *(mine_handle.as_ref() as *const Option<JoinHandle<()>> as *mut Option<JoinHandle<()>>)
-    };
-
     should_mine.store(false, Ordering::Relaxed);
-    if let Some(mine_handle) = mine_handle_ref.take() {
+
+    let mut mine_handle = mine_handle.lock().unwrap();
+    if let Some(mine_handle) = mine_handle.take() {
         let _ = mine_handle.join();
     }
 }
